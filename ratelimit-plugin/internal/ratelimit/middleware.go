@@ -88,9 +88,10 @@ func Middleware(store *ConfigStore, lim *Limiter) gin.HandlerFunc {
 			if displayModel == "" {
 				displayModel = "*"
 			}
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{
+				"type": "error",
 				"error": gin.H{
-					"type":     "rate_limit_exceeded",
+					"type":     "invalid_request_error",
 					"message":  fmt.Sprintf("Quota exceeded for model %q — %d req / %s. Try again in %ds or switch model.", displayModel, limit, window, retryAfter),
 					"model":    displayModel,
 					"limit":    limit,

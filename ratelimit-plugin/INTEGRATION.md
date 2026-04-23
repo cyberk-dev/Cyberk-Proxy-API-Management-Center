@@ -152,12 +152,12 @@ curl -i -X POST http://localhost:8317/v1/chat/completions \
 #   X-RateLimit-Remaining: 499
 #   X-RateLimit-Reset: <unix-timestamp>
 
-# Spam tới khi 429:
+# Spam tới khi bị reject:
 for i in $(seq 1 600); do
   curl -s -o /dev/null -w "%{http_code}\n" -X POST ... ;
 done | sort | uniq -c
 #   500 200
-#   100 429
+#   100 400   ← bị rate-limit, trả 400 invalid_request_error để Claude Code không retry
 ```
 
 Check logs:
@@ -203,7 +203,7 @@ Không cần restart container.
 | Container restart về 0 request | `state/` thiếu permission write. `chmod 777 state` hoặc chạy container với `user: "$(id -u):$(id -g)"`. |
 | Hot-reload không trigger trên Docker Desktop macOS | Bind mount qua VirtioFS đôi khi mất fsnotify event — plugin có fallback 30s stat-based. Đợi 30s là reload. |
 | Config sai syntax → không reload | Log sẽ in `ratelimit: reload config: invalid ...`. Config cũ vẫn giữ, không crash. |
-| 429 ngay từ request đầu | State file cũ còn counter chưa expire. Xóa `state/ratelimit-state.json` rồi restart. |
+| Bị reject (400) ngay từ request đầu | State file cũ còn counter chưa expire. Xóa `state/ratelimit-state.json` rồi restart. |
 | Upstream panel (`/management.html`) không rate-limit | Đúng — plugin skip `/v0/management`, `/management.html`, `/healthz`, `/`, `/v1/models`, `/v1beta/models` by design. |
 
 ---

@@ -50,7 +50,7 @@ func sendJSON(t *testing.T, url, key, model string) *http.Response {
 	return resp
 }
 
-func TestMiddleware_429AfterLimit(t *testing.T) {
+func TestMiddleware_RejectedAfterLimit(t *testing.T) {
 	cfg := mustParse(t, `
 ratelimit:
   window: 1h
@@ -72,8 +72,8 @@ ratelimit:
 
 	resp := sendJSON(t, url, "alice", "gpt-4")
 	defer resp.Body.Close()
-	if resp.StatusCode != 429 {
-		t.Fatalf("3rd request: got %d", resp.StatusCode)
+	if resp.StatusCode != 400 {
+		t.Fatalf("3rd request: got %d, want 400 (non-retryable)", resp.StatusCode)
 	}
 	if ra := resp.Header.Get("Retry-After"); ra == "" {
 		t.Error("missing Retry-After")
@@ -82,7 +82,7 @@ ratelimit:
 	var payload map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&payload)
 	errObj, _ := payload["error"].(map[string]any)
-	if errObj == nil || errObj["type"] != "rate_limit_exceeded" {
+	if errObj == nil || errObj["type"] != "invalid_request_error" {
 		t.Errorf("bad error payload: %+v", payload)
 	}
 }
@@ -134,7 +134,7 @@ func TestMiddleware_SkipManagement(t *testing.T) {
 		resp, _ := http.DefaultClient.Do(req)
 		resp.Body.Close()
 		if resp.StatusCode != 200 {
-			t.Fatalf("management req %d: %d (should never 429)", i, resp.StatusCode)
+			t.Fatalf("management req %d: %d (should never be rate-limited)", i, resp.StatusCode)
 		}
 	}
 }
@@ -197,8 +197,8 @@ ratelimit:
 	}
 	resp = sendJSON(t, srv.URL+"/v1/chat/completions", "alice", "expensive")
 	resp.Body.Close()
-	if resp.StatusCode != 429 {
-		t.Fatalf("2nd expensive should 429: %d", resp.StatusCode)
+	if resp.StatusCode != 400 {
+		t.Fatalf("2nd expensive should 400: %d", resp.StatusCode)
 	}
 
 	// Different model not affected.
@@ -231,7 +231,7 @@ ratelimit:
 	if s := send(); s != 200 {
 		t.Fatalf("1st: %d", s)
 	}
-	if s := send(); s != 429 {
-		t.Fatalf("2nd should 429: %d", s)
+	if s := send(); s != 400 {
+		t.Fatalf("2nd should 400: %d", s)
 	}
 }
