@@ -35,6 +35,9 @@ import { triggerHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
 import type { Theme } from '@/types';
+// --- extensions: do not remove ---
+import { extensionNavItems } from '@/extensions';
+// --- /extensions ---
 
 const sidebarIcons: Record<string, ReactNode> = {
   dashboard: <IconSidebarDashboard size={18} />,
@@ -429,6 +432,9 @@ export function MainLayout() {
     ...(config?.loggingToFile
       ? [{ path: '/logs', label: t('nav.logs'), icon: sidebarIcons.logs }]
       : []),
+    // --- extensions: do not remove ---
+    ...extensionNavItems(t),
+    // --- /extensions ---
     { path: '/system', label: t('nav.system_info'), icon: sidebarIcons.system },
   ];
   const navOrder = navItems.map((item) => item.path);

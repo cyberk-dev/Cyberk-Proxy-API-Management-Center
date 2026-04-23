@@ -20,6 +20,9 @@ import { UsagePage } from '@/pages/UsagePage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
 import { SystemPage } from '@/pages/SystemPage';
+// --- extensions: do not remove ---
+import { extensionRoutes } from '@/extensions';
+// --- /extensions ---
 
 const mainRoutes = [
   { path: '/', element: <DashboardPage /> },
@@ -76,6 +79,9 @@ const mainRoutes = [
   { path: '/config', element: <ConfigPage /> },
   { path: '/logs', element: <LogsPage /> },
   { path: '/system', element: <SystemPage /> },
+  // --- extensions: do not remove ---
+  ...extensionRoutes,
+  // --- /extensions ---
   { path: '*', element: <Navigate to="/" replace /> },
 ];
 

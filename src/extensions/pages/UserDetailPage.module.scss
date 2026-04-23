@@ -1,0 +1,272 @@
+@use '../../styles/variables' as *;
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+}
+
+.backLink {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 0.875rem;
+  padding: 0;
+}
+
+.backLink:hover {
+  text-decoration: underline;
+}
+
+.pageHeader {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-sm;
+  padding: $spacing-lg;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.headerRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: $spacing-md;
+  justify-content: space-between;
+}
+
+.keyLabel {
+  font-family: $font-mono;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  user-select: all;
+  word-break: break-all;
+}
+
+.aliasBlock {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+  flex: 1;
+  min-width: 260px;
+}
+
+.aliasInline {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+}
+
+.aliasInlineTitle {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.orphanBadge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.headerActions {
+  display: flex;
+  gap: $spacing-sm;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.btn {
+  padding: 6px 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: var(--bg-hover);
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: $spacing-md;
+}
+
+.statCard {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: $spacing-md;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.statLabel {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.statValue {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.statMuted {
+  font-size: 0.875rem;
+  color: var(--text-tertiary);
+}
+
+.sectionCard {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.sectionHeader {
+  padding: $spacing-md $spacing-md $spacing-sm;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: $spacing-sm;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sectionNote {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  padding: 0 $spacing-md $spacing-sm;
+}
+
+.rangeGroup {
+  display: flex;
+  gap: $spacing-xs;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.rangeBtn {
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.rangeBtn:hover {
+  background: var(--bg-hover);
+}
+
+.rangeBtnActive {
+  background: var(--primary-color);
+  color: var(--primary-contrast);
+  border-color: var(--primary-color);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.table th,
+.table td {
+  padding: $spacing-sm $spacing-md;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.table th {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-weight: 500;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.logTableWrap {
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.badgeOk {
+  background: var(--success-badge-bg);
+  color: var(--success-badge-text);
+  border: 1px solid var(--success-badge-border);
+}
+
+.badgeFailed {
+  background: var(--failure-badge-bg);
+  color: var(--failure-badge-text);
+  border: 1px solid var(--failure-badge-border);
+}
+
+.emptyState {
+  padding: $spacing-xl;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.logFooter {
+  padding: $spacing-sm $spacing-md;
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.rlNote {
+  font-style: italic;
+}
+
+.mono {
+  font-family: $font-mono;
+  font-size: 0.8125rem;
+}

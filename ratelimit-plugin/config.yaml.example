@@ -1,0 +1,51 @@
+# Example config.yaml demonstrating rate-limit plugin features.
+# This file is a SUPERSET of CLIProxyAPI's config.yaml — the base proxy fields
+# (api-keys, generative-language-api-key, etc.) are unchanged. The plugin reads
+# a separate top-level `ratelimit:` section that the upstream proxy ignores.
+
+# ── Base CLIProxyAPI config (standard fields) ────────────────────────────────
+port: 8317
+auth-dir: "./auths"
+
+# Inline API keys accepted by the proxy's built-in access provider.
+api-keys:
+  - alice-key
+  - bob-key
+  - vip-key
+
+# ── Rate-limit plugin config (additive, optional) ────────────────────────────
+# Resolution order when a request comes in:
+#   1. models[model].keys[apiKey]             — exact model + per-key override
+#   2. models[wildcard].keys[apiKey]           — wildcard + per-key override
+#   3. models[model]                           — exact model default
+#   4. models[wildcard]                        — wildcard default (most-specific wins)
+#   5. top-level requests/window               — global default
+#
+# If nothing matches, request is not rate-limited.
+ratelimit:
+  # Default window + limit applied to any (apiKey, model) not matched above.
+  window: 5h
+  requests: 500
+
+  models:
+    # Exact model match — beats any wildcard below.
+    gpt-5.4:
+      window: 2h
+      requests: 100
+      keys:
+        # Per-key override for this model. 0 = skip (fall through to model default).
+        alice-key: 50
+
+    # Wildcard pattern using path.Match syntax (`*`, `?`, `[abc]`).
+    # Specificity (literal char count) breaks ties: "gpt-5.4-*" beats "gpt-*".
+    "gpt-5.4-*":
+      requests: 300
+      # Inherits window from top-level (5h) since not specified.
+
+    "claude-*-sonnet-*":
+      window: 10m
+      requests: 60
+
+    # No window → inherits 5h. No keys → applies uniformly.
+    gemini-2.5-pro:
+      requests: 200

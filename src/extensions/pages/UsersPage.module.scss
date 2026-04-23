@@ -1,0 +1,225 @@
+@use '../../styles/variables' as *;
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-lg;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: $spacing-md;
+}
+
+.pageTitle {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.description {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.headerActions {
+  display: flex;
+  gap: $spacing-sm;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.searchInput {
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  min-width: 220px;
+}
+
+.errorBox {
+  padding: $spacing-sm $spacing-md;
+  background: var(--bg-error-light);
+  color: var(--error-color);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--error-color);
+}
+
+.tableCard {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.table th,
+.table td {
+  padding: $spacing-sm $spacing-md;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: middle;
+}
+
+.table th {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-weight: 500;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.table tbody tr {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.table tbody tr.orphan {
+  opacity: 0.65;
+}
+
+.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.aliasCell {
+  max-width: 260px;
+}
+
+.aliasView {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+}
+
+.aliasText {
+  font-weight: 500;
+}
+
+.aliasMuted {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.aliasEditBtn {
+  background: none;
+  border: none;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 2px 6px;
+  border-radius: var(--radius-md);
+}
+
+.aliasEditBtn:hover {
+  background: var(--bg-hover);
+}
+
+.aliasEditor {
+  display: flex;
+  gap: $spacing-xs;
+  align-items: center;
+}
+
+.aliasInput {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  min-width: 140px;
+}
+
+.miniBtn {
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-radius: var(--radius-md);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.miniBtn:hover {
+  background: var(--bg-hover);
+}
+
+.miniBtnPrimary {
+  background: var(--primary-color);
+  color: var(--primary-contrast);
+  border-color: var(--primary-color);
+}
+
+.miniBtnPrimary:hover {
+  background: var(--primary-hover);
+}
+
+.keyCell {
+  font-family: $font-mono;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.orphanBadge {
+  display: inline-block;
+  margin-left: $spacing-xs;
+  padding: 1px 6px;
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  border-radius: var(--radius-md);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.modelsCell {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.modelsCellMore {
+  color: var(--text-tertiary);
+}
+
+.sectionLabel {
+  padding: $spacing-sm $spacing-md;
+  background: var(--bg-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+}
+
+.emptyState {
+  padding: $spacing-xl;
+  text-align: center;
+  color: var(--text-tertiary);
+}
+
+.loadingState {
+  padding: $spacing-xl;
+  text-align: center;
+  color: var(--text-secondary);
+}
