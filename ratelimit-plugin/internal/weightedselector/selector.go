@@ -16,6 +16,13 @@ import (
 // routes (see SDK selector.go preferCodexWebsocketAuths and service.go call sites).
 const codexProvider = "codex"
 
+// mixedProvider is the literal string the SDK passes to selector.Pick when
+// multiple providers are eligible for a request. Every Execute / ExecuteStream
+// call for OAuth routes goes through pickNextMixed → Pick(ctx, "mixed", ...)
+// (SDK conductor.go:2786), even when only one provider ("codex") actually has
+// matching auths. We must handle this path or weighted routing never fires.
+const mixedProvider = "mixed"
+
 // maxPoolKeys caps the pools map to protect against a hostile or buggy client
 // spamming distinct (provider, model, ws) combinations. Matches the SDK's
 // RoundRobinSelector.maxKeys default (sdk/cliproxy/auth/selector.go:274,324-328):
@@ -63,7 +70,20 @@ func (s *Selector) Pick(
 	opts cliproxyexecutor.Options,
 	auths []*coreauth.Auth,
 ) (*coreauth.Auth, error) {
-	if !s.cfg.Enabled || !strings.EqualFold(strings.TrimSpace(provider), codexProvider) {
+	if !s.cfg.Enabled {
+		return s.base.Pick(ctx, provider, model, opts, auths)
+	}
+	// Accept two shapes:
+	//   (a) provider == "codex" — direct single-provider pick (rare; only the
+	//       scheduler fast path uses this, and our non-built-in selector
+	//       disables the fast path anyway, so this mostly never fires).
+	//   (b) provider == "mixed" with a candidate set that is entirely Codex.
+	//       This is the common case: SDK conductor.go:2786 always routes via
+	//       pickNextMixed, so every Codex request arrives here as "mixed".
+	// Anything else (explicit non-codex provider, or a truly cross-provider
+	// mixed set) falls through to the base selector unchanged.
+	providerLower := strings.ToLower(strings.TrimSpace(provider))
+	if providerLower != codexProvider && !(providerLower == mixedProvider && allCodexAuths(auths)) {
 		return s.base.Pick(ctx, provider, model, opts, auths)
 	}
 
@@ -96,7 +116,9 @@ func (s *Selector) Pick(
 		return s.base.Pick(ctx, provider, model, opts, auths)
 	}
 
-	key := poolKey(provider, model, wsDownstream)
+	// Always key the pool under the canonical "codex" provider — even when the
+	// caller passed "mixed" — so SWRR state is stable across both code paths.
+	key := poolKey(codexProvider, model, wsDownstream)
 	p := s.getOrCreatePool(key)
 	chosen := p.pick(ids, weights)
 	if chosen == "" {
@@ -146,6 +168,23 @@ func poolKey(provider, model string, ws bool) string {
 		prefix = "ws:"
 	}
 	return prefix + provider + ":" + canonicalModelKey(model)
+}
+
+// allCodexAuths returns true when the candidate list is non-empty and every
+// entry is a Codex auth. Used to distinguish "mixed route that happens to
+// resolve to only Codex candidates" from a genuine cross-provider pick.
+func allCodexAuths(auths []*coreauth.Auth) bool {
+	seen := false
+	for _, a := range auths {
+		if a == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(a.Provider), codexProvider) {
+			return false
+		}
+		seen = true
+	}
+	return seen
 }
 
 // planTypeOf extracts the plan_type attribute written by the SDK's Codex JWT

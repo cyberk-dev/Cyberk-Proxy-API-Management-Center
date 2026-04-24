@@ -32,9 +32,16 @@ func (f *fakeBase) Pick(_ context.Context, _ string, _ string, _ cliproxyexecuto
 func makeAuth(id, planType string) *coreauth.Auth {
 	return &coreauth.Auth{
 		ID:         id,
+		Provider:   "codex",
 		Status:     coreauth.StatusActive,
 		Attributes: map[string]string{"plan_type": planType},
 	}
+}
+
+func makeAuthProvider(id, planType, provider string) *coreauth.Auth {
+	a := makeAuth(id, planType)
+	a.Provider = provider
+	return a
 }
 
 func TestSelectorDelegatesNonCodex(t *testing.T) {
@@ -403,6 +410,92 @@ func TestSelectorPoolMapCapped(t *testing.T) {
 	s.mu.Unlock()
 	if size > maxPoolKeys {
 		t.Fatalf("pools size = %d, must be <= %d", size, maxPoolKeys)
+	}
+}
+
+// Regression for the v6.9.34 deployment miss: the SDK routes every
+// Execute/ExecuteStream call through pickNextMixed, which calls
+// selector.Pick(ctx, "mixed", ...). A strict provider=="codex" check skips the
+// weighted branch and all Codex traffic falls back to round-robin. Mixed-path
+// with an all-Codex candidate set must still be weighted.
+func TestSelectorAppliesWeightToMixedProviderPath(t *testing.T) {
+	base := &fakeBase{}
+	cfg, _ := parseBytes([]byte(`codex_weights: { pro: 10, plus: 1 }`))
+	s := New(base, cfg)
+
+	auths := []*coreauth.Auth{makeAuth("pro1", "pro"), makeAuth("plus1", "plus")}
+	counts := map[string]int{}
+	for i := 0; i < 11; i++ {
+		a, err := s.Pick(context.Background(), "mixed", "gpt-5", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+		counts[a.ID]++
+	}
+	if counts["pro1"] != 10 || counts["plus1"] != 1 {
+		t.Fatalf("mixed-path: pro=%d plus=%d, want 10/1", counts["pro1"], counts["plus1"])
+	}
+	if base.calls != 0 {
+		t.Fatalf("base.calls = %d, want 0 for mixed all-codex", base.calls)
+	}
+}
+
+// Mixed path with an empty candidate list must delegate — allCodexAuths returns
+// false and the base selector owns the "no auths" error shape.
+func TestSelectorMixedPathEmptyAuthsDelegates(t *testing.T) {
+	base := &fakeBase{err: errors.New("no auth")}
+	cfg, _ := parseBytes([]byte(`codex_weights: { pro: 10, plus: 1 }`))
+	s := New(base, cfg)
+
+	_, err := s.Pick(context.Background(), "mixed", "gpt-5", cliproxyexecutor.Options{}, nil)
+	if err == nil {
+		t.Fatalf("expected delegate error")
+	}
+	if base.calls != 1 {
+		t.Fatalf("base.calls = %d, want 1", base.calls)
+	}
+}
+
+// Mixed path with a truly cross-provider candidate set must delegate — the
+// weighted branch is only safe when every candidate is a Codex auth.
+func TestSelectorMixedPathCrossProviderDelegates(t *testing.T) {
+	base := &fakeBase{}
+	cfg, _ := parseBytes([]byte(`codex_weights: { pro: 10, plus: 1 }`))
+	s := New(base, cfg)
+
+	auths := []*coreauth.Auth{
+		makeAuth("codex1", "pro"),
+		makeAuthProvider("claude1", "", "claude"),
+	}
+	if _, err := s.Pick(context.Background(), "mixed", "some-model", cliproxyexecutor.Options{}, auths); err != nil {
+		t.Fatalf("pick err: %v", err)
+	}
+	if base.calls != 1 {
+		t.Fatalf("base.calls = %d, want 1 (cross-provider delegates)", base.calls)
+	}
+}
+
+// Both entry shapes — provider=="codex" and provider=="mixed" with all-codex
+// candidates — must share SWRR state under the same (model, ws) key. Otherwise
+// a process that sees both paths (e.g. some internal sub-request using "codex"
+// directly) fragments the distribution.
+func TestSelectorMixedAndCodexSharePool(t *testing.T) {
+	base := &fakeBase{}
+	cfg, _ := parseBytes([]byte(`codex_weights: { pro: 10, plus: 1 }`))
+	s := New(base, cfg)
+
+	auths := []*coreauth.Auth{makeAuth("pro1", "pro"), makeAuth("plus1", "plus")}
+	counts := map[string]int{}
+	for i := 0; i < 11; i++ {
+		provider := "codex"
+		if i%2 == 1 {
+			provider = "mixed"
+		}
+		a, _ := s.Pick(context.Background(), provider, "gpt-5", cliproxyexecutor.Options{}, auths)
+		counts[a.ID]++
+	}
+	if counts["pro1"] != 10 || counts["plus1"] != 1 {
+		t.Fatalf("shared pool: pro=%d plus=%d, want 10/1", counts["pro1"], counts["plus1"])
 	}
 }
 
