@@ -57,15 +57,14 @@ function extractTotalTokens(detail: Record<string, unknown>): number {
   const tokensRaw = detail.tokens;
   if (!isRecord(tokensRaw)) return 0;
   if (typeof tokensRaw.total_tokens === 'number') return tokensRaw.total_tokens;
+  // Fallback when upstream didn't emit `total_tokens`. Keep the formula
+  // consistent with `keyPivot.ts` (rawInput + output): do NOT add `cached` or
+  // `reasoning`, since for Codex `input_tokens` already includes the cached
+  // slice and `output_tokens` already includes `reasoning_tokens` — adding
+  // them again silently double/triple-counts gpt-* traffic.
   const input = typeof tokensRaw.input_tokens === 'number' ? tokensRaw.input_tokens : 0;
   const output = typeof tokensRaw.output_tokens === 'number' ? tokensRaw.output_tokens : 0;
-  const reasoning =
-    typeof tokensRaw.reasoning_tokens === 'number' ? tokensRaw.reasoning_tokens : 0;
-  const cached = Math.max(
-    typeof tokensRaw.cached_tokens === 'number' ? Math.max(tokensRaw.cached_tokens, 0) : 0,
-    typeof tokensRaw.cache_tokens === 'number' ? Math.max(tokensRaw.cache_tokens, 0) : 0
-  );
-  return input + output + reasoning + cached;
+  return input + output;
 }
 
 interface Summary {

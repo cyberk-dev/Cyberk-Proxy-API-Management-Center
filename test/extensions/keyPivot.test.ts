@@ -195,6 +195,60 @@ describe('pivotByKey', () => {
     assert.equal(alice.failureCount, 1);
     assert.equal(alice.successCount, 3);
   });
+
+  it('normalizes gpt-* inputTokens by subtracting the cached slice', () => {
+    const usage = {
+      apis: {
+        'sk-x': {
+          models: {
+            'gpt-5': {
+              details: [
+                {
+                  timestamp: '2026-04-20T10:00:00Z',
+                  tokens: {
+                    input_tokens: 1000,
+                    output_tokens: 200,
+                    cached_tokens: 800,
+                    total_tokens: 1200
+                  },
+                  failed: false
+                }
+              ]
+            },
+            'claude-sonnet': {
+              details: [
+                {
+                  timestamp: '2026-04-20T11:00:00Z',
+                  tokens: {
+                    input_tokens: 1000,
+                    output_tokens: 200,
+                    cached_tokens: 800,
+                    total_tokens: 1200
+                  },
+                  failed: false
+                }
+              ]
+            }
+          }
+        }
+      }
+    };
+    const result = pivotByKey(usage, ['sk-x'], {}, noCost);
+    const row = result[0];
+    const gpt = row.perModel.find((m) => m.model === 'gpt-5')!;
+    const claude = row.perModel.find((m) => m.model === 'claude-sonnet')!;
+    // gpt-*: input_tokens includes cached → normalize to 1000 - 800 = 200
+    assert.equal(gpt.inputTokens, 200);
+    assert.equal(gpt.cachedTokens, 800);
+    // Claude: input_tokens already excludes cached → pass through unchanged
+    assert.equal(claude.inputTokens, 1000);
+    assert.equal(claude.cachedTokens, 800);
+    // Per-key totals aggregate both
+    assert.equal(row.inputTokens, 200 + 1000);
+    // totalTokens preserves upstream semantics (not normalized)
+    assert.equal(gpt.totalTokens, 1200);
+    assert.equal(claude.totalTokens, 1200);
+  });
 });
 
 describe('makeCostFn', () => {
@@ -203,16 +257,32 @@ describe('makeCostFn', () => {
     assert.equal(fn('any', { input_tokens: 1000, output_tokens: 1000 }), 0);
   });
 
-  it('deducts cached from prompt cost', () => {
-    const fn = makeCostFn({ m: { prompt: 10, completion: 20, cache: 1 } });
-    // 1000 input, 400 cached → prompt=600*10/1M, cache=400*1/1M, completion=200*20/1M
-    const c = fn('m', { input_tokens: 1000, output_tokens: 200, cached_tokens: 400 });
+  it('deducts cached from prompt cost for gpt-* (input includes cached)', () => {
+    const fn = makeCostFn({ 'gpt-5': { prompt: 10, completion: 20, cache: 1 } });
+    // 1000 input (incl cached), 400 cached → prompt=600*10/1M, cache=400*1/1M, completion=200*20/1M
+    const c = fn('gpt-5', { input_tokens: 1000, output_tokens: 200, cached_tokens: 400 });
     closeTo(c, 0.006 + 0.0004 + 0.004);
   });
 
-  it('takes the max of cached_tokens and cache_tokens', () => {
-    const fn = makeCostFn({ m: { prompt: 10, completion: 0, cache: 1 } });
-    const c = fn('m', { input_tokens: 1000, output_tokens: 0, cached_tokens: 100, cache_tokens: 300 });
+  it('does not deduct cached for Claude (input already excludes cached)', () => {
+    const fn = makeCostFn({ 'claude-sonnet': { prompt: 10, completion: 20, cache: 1 } });
+    // 1000 new input, 400 cached (separate) → prompt=1000*10/1M, cache=400*1/1M, completion=200*20/1M
+    const c = fn('claude-sonnet', {
+      input_tokens: 1000,
+      output_tokens: 200,
+      cached_tokens: 400
+    });
+    closeTo(c, 0.01 + 0.0004 + 0.004);
+  });
+
+  it('takes the max of cached_tokens and cache_tokens (gpt-*)', () => {
+    const fn = makeCostFn({ 'gpt-5': { prompt: 10, completion: 0, cache: 1 } });
+    const c = fn('gpt-5', {
+      input_tokens: 1000,
+      output_tokens: 0,
+      cached_tokens: 100,
+      cache_tokens: 300
+    });
     // cached=300, prompt=700*10/1M=0.007, cache=300*1/1M=0.0003
     closeTo(c, 0.0073);
   });

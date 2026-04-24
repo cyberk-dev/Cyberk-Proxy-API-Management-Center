@@ -10,6 +10,7 @@ import {
   type UsageDetail,
   type UsageTimeRange
 } from '@/utils/usage';
+import { getNewInputTokens } from '../utils/tokenSemantics';
 import { maskApiKey } from '@/utils/format';
 import { resolveDefaultModelPrice } from '@/data/defaultModelPrices';
 import { useConfigStore, useNotificationStore } from '@/stores';
@@ -151,6 +152,18 @@ export function UserDetailPage() {
 
   const singleUsage = useMemo(() => isolateApiKey(usage, decodedKey), [usage, decodedKey]);
 
+  // Whether the decoded key has any data in the raw usage export (ignoring the
+  // current time-range filter). Used to decide between "truly not found" and
+  // "found, but current range is empty" so we can still show the range picker
+  // in the latter case.
+  const keyHasAnyUsage = useMemo(() => {
+    if (!decodedKey) return false;
+    if (!singleUsage || typeof singleUsage !== 'object') return false;
+    const apis = (singleUsage as { apis?: unknown }).apis;
+    if (!apis || typeof apis !== 'object' || Array.isArray(apis)) return false;
+    return Object.prototype.hasOwnProperty.call(apis, decodedKey);
+  }, [singleUsage, decodedKey]);
+
   const filteredUsage = useMemo(
     () => filterUsageByTimeRange(singleUsage, range),
     [singleUsage, range]
@@ -284,7 +297,11 @@ export function UserDetailPage() {
 
   const rlEnabled = rlConfig !== null && (rlConfig.default || Object.keys(rlConfig.models).length > 0);
 
-  if (!usageLoading && !keyStats) {
+  // Only bail when the key itself cannot be found in the usage export. If the
+  // key exists but the selected time range filters out everything, fall
+  // through so the page still renders with the range picker (otherwise the
+  // user gets stuck on a blank "not found" screen and can't switch ranges).
+  if (!usageLoading && !keyHasAnyUsage) {
     return (
       <div className={styles.container}>
         <button className={styles.backLink} onClick={() => navigate('/custom/users')}>
@@ -540,12 +557,13 @@ export function UserDetailPage() {
                   d.tokens?.cached_tokens ?? 0,
                   d.tokens?.cache_tokens ?? 0
                 );
+                const newInput = getNewInputTokens(d.tokens, d.__modelName);
                 return (
                   <tr key={`${d.timestamp}-${idx}`}>
                     <td>{new Date(d.timestamp).toLocaleString()}</td>
                     <td className={styles.mono}>{d.__modelName ?? '—'}</td>
                     <td className={styles.numeric}>
-                      {formatNumber(d.tokens?.input_tokens ?? 0)}
+                      {formatNumber(newInput)}
                     </td>
                     <td className={styles.numeric}>
                       {formatNumber(d.tokens?.output_tokens ?? 0)}

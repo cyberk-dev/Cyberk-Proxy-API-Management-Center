@@ -33,9 +33,16 @@ export interface PerKeyModelStats {
   requests: number;
   successCount: number;
   failureCount: number;
+  /** "New" prompt tokens — normalized so gpt-* rows exclude the cached slice. */
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  /**
+   * Upstream-preserved sum of `tokens.total_tokens`. Keeps parity with the raw
+   * proxy export, which means this may NOT equal `inputTokens + outputTokens`
+   * for OpenAI-family models (their `total_tokens` still includes the cached
+   * slice, while `inputTokens` here does not).
+   */
   totalTokens: number;
   cost: number;
   lastActiveMs: number;
@@ -47,9 +54,16 @@ export interface PerKeyStats {
   totalRequests: number;
   successCount: number;
   failureCount: number;
+  /** "New" prompt tokens — normalized so gpt-* rows exclude the cached slice. */
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
+  /**
+   * Upstream-preserved sum of `tokens.total_tokens`. Keeps parity with the raw
+   * proxy export, which means this may NOT equal `inputTokens + outputTokens`
+   * for OpenAI-family models (their `total_tokens` still includes the cached
+   * slice, while `inputTokens` here does not).
+   */
   totalTokens: number;
   totalCost: number;
   lastActiveMs: number;
@@ -59,6 +73,14 @@ export interface PerKeyStats {
 }
 
 const TOKENS_PER_PRICE_UNIT = 1_000_000;
+
+// OpenAI-style providers report `input_tokens` as total-including-cached;
+// Claude reports it as new-only. Mirrors `inputIncludesCached` in
+// `./tokenSemantics.ts`; kept inline so this module remains free of `@/` and
+// cross-file imports (see the file header). Keep the two lists in sync.
+const INPUT_INCLUDES_CACHED_PREFIXES = ['gpt-'];
+const inputIncludesCached = (modelName: string): boolean =>
+  INPUT_INCLUDES_CACHED_PREFIXES.some((prefix) => modelName.startsWith(prefix));
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -103,7 +125,13 @@ export function makeCostFn(modelPrices: Record<string, ModelPrice>): CostFn {
     const rawCachedPrimary = safeNumber(tokens.cached_tokens);
     const rawCachedAlternate = safeNumber(tokens.cache_tokens);
     const cachedTokens = Math.max(rawCachedPrimary, rawCachedAlternate);
-    const promptTokens = Math.max(rawInput - cachedTokens, 0);
+    // For OpenAI-style providers `input_tokens` includes the cached slice, so
+    // subtract to get the new-prompt size. Claude already reports `input_tokens`
+    // as new-only (cached is reported separately), so subtracting there would
+    // zero out small prompts and underbill.
+    const promptTokens = inputIncludesCached(modelName)
+      ? Math.max(rawInput - cachedTokens, 0)
+      : rawInput;
     const promptCost = (promptTokens / TOKENS_PER_PRICE_UNIT) * (Number(price.prompt) || 0);
     const cachedCost = (cachedTokens / TOKENS_PER_PRICE_UNIT) * (Number(price.cache) || 0);
     const completionCost = (rawOutput / TOKENS_PER_PRICE_UNIT) * (Number(price.completion) || 0);
@@ -160,13 +188,24 @@ export function pivotByKey(
       for (const raw of details) {
         if (!isRecord(raw)) continue;
         const tokensRaw = (isRecord(raw.tokens) ? raw.tokens : {}) as TokenBundle;
-        const inputT = safeNumber(tokensRaw.input_tokens);
+        const rawInput = safeNumber(tokensRaw.input_tokens);
         const outT = safeNumber(tokensRaw.output_tokens);
         const cachedT = Math.max(
           safeNumber(tokensRaw.cached_tokens),
           safeNumber(tokensRaw.cache_tokens)
         );
-        const totalT = safeNumber(tokensRaw.total_tokens) || inputT + outT;
+        // Normalize `input` so it always means "new prompt tokens" (i.e. the
+        // portion NOT served from cache). Without this, gpt-* rows pump the
+        // total by the cached slice and the Input column ends up visually
+        // overlapping with the Cached column (see upstream Codex semantics).
+        const inputT = inputIncludesCached(modelName)
+          ? Math.max(rawInput - cachedT, 0)
+          : rawInput;
+        // Preserve upstream `total_tokens` semantics (for Codex this already
+        // includes the cached slice, for Claude it doesn't) so the "Total
+        // tokens" stat card keeps matching the raw proxy export. The new-input
+        // normalization only affects the Input column.
+        const totalT = safeNumber(tokensRaw.total_tokens) || rawInput + outT;
         const failed = raw.failed === true;
         const tsMs = parseTsMs(raw.timestamp);
         const cost = costFn(modelName, tokensRaw);
