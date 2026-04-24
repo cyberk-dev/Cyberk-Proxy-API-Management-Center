@@ -16,8 +16,8 @@ import (
 var (
 	skipPrefixes = []string{"/v0/management", "/management.html", "/healthz", "/v0/ratelimit"}
 	skipExact    = map[string]bool{
-		"/":            true,
-		"/v1/models":   true,
+		"/":              true,
+		"/v1/models":     true,
 		"/v1beta/models": true,
 	}
 )

@@ -7,16 +7,20 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
+	"github.com/cyberk/ratelimit-plugin/internal/weightedselector"
 )
 
 func main() {
@@ -111,11 +115,22 @@ func main() {
 
 	mw := ratelimit.Middleware(store, limiter)
 
-	svc, err := cliproxy.NewBuilder().
+	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(absCfg).
-		WithServerOptions(api.WithMiddleware(mw)).
-		Build()
+		WithServerOptions(api.WithMiddleware(mw))
+
+	wcfg, werr := weightedselector.LoadFromYAML(absCfg)
+	if werr != nil {
+		log.Fatalf("weighted selector: load codex_weights: %v", werr)
+	}
+	if wcfg.Enabled {
+		mgr := buildWeightedCoreManager(cfg, wcfg)
+		builder = builder.WithCoreAuthManager(mgr)
+		log.Infof("weighted selector: enabled for codex (entries=%d)", len(wcfg.Weights))
+	}
+
+	svc, err := builder.Build()
 	if err != nil {
 		log.Fatalf("build cliproxy service: %v", err)
 	}
@@ -129,6 +144,59 @@ func main() {
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		log.Fatalf("cliproxy run: %v", runErr)
 	}
+}
+
+// buildWeightedCoreManager mirrors the SDK's default wiring in
+// sdk/cliproxy/builder.go:204-240, but inserts our weighted selector between
+// session-affinity and the round-robin/fill-first base. Composition order:
+//
+//	SessionAffinitySelector (optional, outer)
+//	 └─ WeightedSelector
+//	     ├─ codex → SWRR by plan_type weight
+//	     └─ others → RoundRobin / FillFirst (base)
+//
+// Rationale: when session affinity is enabled the operator wants sticky
+// routing to trump everything else — a returning conversation must land on its
+// original auth regardless of weights. Weighted routing kicks in whenever SA
+// delegates to its fallback: (a) on cache-miss for new conversations, AND
+// (b) on cache-hit when the cached auth has become unavailable and SA
+// re-selects (see SDK selector.go:498-512 — it calls s.fallback.Pick with the
+// full auth list, which lands here).
+func buildWeightedCoreManager(cfg *config.Config, wcfg weightedselector.Config) *coreauth.Manager {
+	tokenStore := sdkAuth.GetTokenStore()
+	if setter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && cfg != nil {
+		setter.SetBaseDir(cfg.AuthDir)
+	}
+
+	strategy := ""
+	sessionAffinity := false
+	sessionAffinityTTL := time.Hour
+	if cfg != nil {
+		strategy = strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy))
+		sessionAffinity = cfg.Routing.ClaudeCodeSessionAffinity || cfg.Routing.SessionAffinity
+		if ttlStr := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttlStr != "" {
+			if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
+				sessionAffinityTTL = parsed
+			}
+		}
+	}
+
+	var base coreauth.Selector
+	switch strategy {
+	case "fill-first", "fillfirst", "ff":
+		base = &coreauth.FillFirstSelector{}
+	default:
+		base = &coreauth.RoundRobinSelector{}
+	}
+
+	var selector coreauth.Selector = weightedselector.New(base, wcfg)
+	if sessionAffinity {
+		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+			Fallback: selector,
+			TTL:      sessionAffinityTTL,
+		})
+	}
+	return coreauth.NewManager(tokenStore, selector, nil)
 }
 
 func maxWindowOf(cfg *ratelimit.Config) time.Duration {

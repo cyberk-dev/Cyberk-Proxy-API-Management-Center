@@ -17,7 +17,7 @@ type Config struct {
 	Requests int
 	Models   map[string]ModelConfig
 
-	modelOrder []string
+	modelOrder   []string
 	resolveCache sync.Map
 }
 

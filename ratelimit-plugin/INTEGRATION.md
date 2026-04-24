@@ -46,6 +46,22 @@ Plugin tự parse section `ratelimit:` độc lập; upstream CLIProxyAPI bỏ q
 
 **Nếu không có section `ratelimit:`** → plugin chạy như proxy thường, không rate-limit gì (no-op).
 
+### Tuỳ chọn: weighted routing cho Codex
+
+Nếu đang chạy nhiều Codex account khác tier (Pro/Plus/Free), có thể thêm section `codex_weights:` để phân phối request theo tỉ lệ quota. Plugin sẽ gọi `WithCoreAuthManager` và đặt selector custom giữa session affinity và round-robin:
+
+```yaml
+codex_weights:
+  pro: 10
+  plus: 1
+  # plan khác lấy default: prolite=5, free/team/business/go=1
+```
+
+Không có block → không inject gì, SDK routing giữ nguyên (backward-compatible).
+Plan_type được SDK tự đọc từ JWT `chatgpt_plan_type` và ghi vào `auth.Attributes["plan_type"]`.
+
+Chi tiết behavior: xem section "Weighted routing (Codex)" trong `README.md`.
+
 ---
 
 ## Bước 2: build image từ source

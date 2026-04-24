@@ -49,3 +49,33 @@ ratelimit:
     # No window → inherits 5h. No keys → applies uniformly.
     gemini-2.5-pro:
       requests: 200
+
+# ── Weighted routing for Codex (optional) ────────────────────────────────────
+# Distribute Codex requests across upstream accounts proportionally to their
+# subscription weight, derived from the `plan_type` claim embedded in each
+# Codex auth's JWT (read from auth.Attributes["plan_type"]).
+#
+# Omit this block entirely to keep SDK default routing (round-robin / fill-first).
+# Presence of an empty block `codex_weights: {}` enables the feature with the
+# built-in defaults below.
+#
+# Weights are relative — `pro: 10, plus: 1` yields ~10× more traffic to Pro.
+# Plans not listed here inherit the defaults shown below; truly unknown plans
+# (e.g. a future tier not yet in this file) fall back to weight 1, so traffic
+# is never silently dropped.
+#
+# Smooth Weighted Round Robin distributes traffic deterministically — the
+# `pro:10,plus:1` example above picks pro 10 times and plus 1 time in every
+# 11-request cycle, in a smooth interleaved order.
+#
+# Claude / Gemini / other providers: unaffected. Only Codex is weighted here.
+# Session affinity (if enabled above) still wins over weighted pick — a sticky
+# session always returns to its bound auth regardless of weight.
+codex_weights:
+  pro: 10
+  prolite: 5
+  plus: 1
+  free: 1
+  team: 1
+  business: 1
+  go: 1
