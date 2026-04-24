@@ -4,8 +4,11 @@ import { useTranslation } from 'react-i18next';
 import { useUsageData } from '@/components/usage';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import { Select } from '@/components/ui/Select';
+import { IconRefreshCw } from '@/components/ui/icons';
+import { collectUsageDetails, type ModelPrice } from '@/utils/usage';
+import { resolveDefaultModelPrice } from '@/data/defaultModelPrices';
 import { useKeyAliases } from '../hooks/useKeyAliases';
-import { pivotByKey, type PerKeyStats } from '../utils/keyPivot';
+import { makeCostFn, pivotByKey, type PerKeyStats } from '../utils/keyPivot';
 import { buildKeyList } from '../utils/keyIndex';
 import {
   filterUsageByUsersTimeRange,
@@ -13,7 +16,7 @@ import {
   USERS_TIME_RANGE_OPTIONS,
   type UsersTimeRange
 } from '../utils/timeRangeFilter';
-import { formatNumber } from '../utils/keyDisplay';
+import { formatCost, formatNumber } from '../utils/keyDisplay';
 import { AliasEditor } from '../components/AliasEditor';
 import { ModelColumnPicker } from '../components/ModelColumnPicker';
 import styles from './UsersPage.module.scss';
@@ -69,7 +72,13 @@ export function UsersPage() {
   const navigate = useNavigate();
   const { showNotification } = useNotificationStore();
   const config = useConfigStore((s) => s.config);
-  const { usage, loading: usageLoading, error: usageError } = useUsageData();
+  const {
+    usage,
+    loading: usageLoading,
+    error: usageError,
+    loadUsage,
+    modelPrices
+  } = useUsageData();
   const { aliases, loading: aliasesLoading, error: aliasesError, saveAlias } = useKeyAliases();
 
   const [filter, setFilter] = useState('');
@@ -117,14 +126,25 @@ export function UsersPage() {
 
   const knownKeys = useMemo(() => config?.apiKeys || [], [config?.apiKeys]);
 
-  // `pivotByKey` takes a cost function but we don't display cost anywhere —
-  // return 0 to keep the signature satisfied without pulling price data.
-  const costFn = useMemo(() => () => 0, []);
-
   const filteredUsage = useMemo(
     () => filterUsageByUsersTimeRange(usage, timeRange),
     [usage, timeRange]
   );
+
+  // User-configured prices take precedence; fall back to bundled defaults so
+  // models without a manual override still produce a cost instead of $0.
+  const effectiveModelPrices = useMemo(() => {
+    const merged: Record<string, ModelPrice> = { ...modelPrices };
+    for (const d of collectUsageDetails(filteredUsage)) {
+      const name = d.__modelName;
+      if (!name || merged[name]) continue;
+      const def = resolveDefaultModelPrice(name);
+      if (def) merged[name] = def;
+    }
+    return merged;
+  }, [modelPrices, filteredUsage]);
+
+  const costFn = useMemo(() => makeCostFn(effectiveModelPrices), [effectiveModelPrices]);
 
   const rows = useMemo<PerKeyStats[]>(() => {
     const pivoted = pivotByKey(filteredUsage, knownKeys, aliases, costFn);
@@ -140,6 +160,7 @@ export function UsersPage() {
           failureCount: 0,
           inputTokens: 0,
           outputTokens: 0,
+          cachedTokens: 0,
           totalTokens: 0,
           totalCost: 0,
           lastActiveMs: 0,
@@ -237,7 +258,7 @@ export function UsersPage() {
     [t]
   );
 
-  const totalColumns = 2 + effectiveSelectedModels.length;
+  const totalColumns = 3 + effectiveSelectedModels.length;
 
   // Stable index lookup: route params carry the position in this canonical
   // list so API keys never appear in the URL / browser history / referer.
@@ -274,6 +295,7 @@ export function UsersPage() {
           )}
         </td>
         <td className={styles.numeric}>{formatNumber(r.totalRequests)}</td>
+        <td className={styles.numeric}>{formatCost(r.totalCost)}</td>
         {effectiveSelectedModels.map((m) => (
           <td key={m} className={styles.numeric}>
             {formatNumber(perModelMap.get(m) ?? 0)}
@@ -314,6 +336,19 @@ export function UsersPage() {
             selected={effectiveSelectedModels}
             onChange={onSelectedModelsChange}
           />
+          <button
+            type="button"
+            className={styles.refreshBtn}
+            onClick={() => void loadUsage()}
+            disabled={usageLoading}
+            aria-label={t('users.refresh')}
+            title={t('users.refresh')}
+          >
+            <IconRefreshCw
+              size={16}
+              className={usageLoading ? styles.spin : undefined}
+            />
+          </button>
         </div>
       </div>
 
@@ -325,6 +360,7 @@ export function UsersPage() {
             <tr>
               <th>{t('users.col_alias')}</th>
               <th className={styles.numeric}>{t('users.col_requests')}</th>
+              <th className={styles.numeric}>{t('users.col_cost')}</th>
               {effectiveSelectedModels.map((m) => (
                 <th key={m} className={styles.numeric} title={m}>
                   {displayModelName(m)}

@@ -1,0 +1,24 @@
+model,input_per_1M_usd,cache_read_per_1M_usd,output_per_1M_usd,notes,source
+gpt-5.5,5.00,0.50,30.00,"Released Apr 23 2026. API 'coming very soon' — chưa live. Cache tính 2x của 5.4 theo user info. Pro: $30/$180.",openai.com/index/introducing-gpt-5-5
+gpt-5.4,2.50,0.25,15.00,"Short context (<=200K). Long ctx (>200K): $5/$0.5/$22.50. Data residency +10%.",developers.openai.com/api/docs/pricing
+gpt-5.2,1.75,0.175,14.00,"Frontier predecessor. 400K ctx. Cache = 10% input.",platform.openai.com/docs/models/gpt-5.2
+gpt-5.3-codex,1.75,0.175,14.00,"Standard. Priority tier: $3.50/$0.35/$28.",developers.openai.com/api/docs/pricing
+gpt-image-2,8.00,2.00,30.00,"Image tokens. Text tokens: $5 / $1.25 / $10. API mở đầu tháng 5/2026.",the-decoder.com + fal.ai/models/openai/gpt-image-2
+gpt-5.4-mini,0.75,0.075,4.50,"Batch: $0.375/$0.0375/$2.25. Cache = 10% input.",developers.openai.com/api/docs/pricing
+gpt-5.3-codex-spark,,,,"KHÔNG có API công khai. Research preview chỉ cho ChatGPT Pro.",developers.openai.com/codex/pricing
+claude-haiku-4-5-20251001,1.00,0.10,5.00,"Cache 5m write: $1.25. Cache 1h write: $2.",platform.claude.com/docs/en/about-claude/pricing
+claude-sonnet-4-6,3.00,0.30,15.00,"Cache 5m write: $3.75. Cache 1h write: $6. 1M ctx flat.",platform.claude.com/docs/en/about-claude/pricing
+claude-sonnet-4-5,3.00,0.30,15.00,"Cache 5m write: $3.75. Cache 1h write: $6.",platform.claude.com/docs/en/about-claude/pricing
+claude-opus-4-7,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10. New tokenizer có thể dùng +35% tokens/same text.",platform.claude.com/docs/en/about-claude/pricing
+claude-opus-4-6,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10. Fast mode: $30/$150.",platform.claude.com/docs/en/about-claude/pricing
+claude-opus-4-5,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10.",platform.claude.com/docs/en/about-claude/pricing
+kimi-k2.5,0.60,0.10,3.00,"Moonshot platform official landing page.",platform.moonshot.ai
+kimi-k2.6,0.95,0.16,4.00,"Moonshot platform official landing page. 256K ctx.",platform.moonshot.ai
+qwen3.6-plus,0.50,0.10,3.00,"Released 2/4/2026. 1M ctx. Cache là suy luận từ Plus family implicit cache rule (20% × $0.50 = $0.10) - CHƯA verify trực tiếp cho snapshot 3.6 này.",artificialanalysis.ai/models/qwen3-6-plus (cite 'based on Alibaba API')
+qwen3-coder-next,0.30,,1.50,"Tiered Intl EU: 0-32K $0.3/$1.5. 32-128K $0.5/$2.5. 128-256K $0.8/$4. KHÔNG hỗ trợ context cache theo docs chính thức.",alibabacloud.com/help/en/model-studio/model-pricing + /context-cache
+qwen3.5-plus,0.40,0.08,2.40,"Tiered Intl Singapore. 0-256K: $0.4/$2.4. 256K-1M: $0.5/$3. Implicit cache = 20% input (tự động) → $0.08.",alibabacloud.com/help/en/model-studio/model-pricing + /context-cache
+qwen3-max-2026-01-23,1.20,0.24,6.00,"Tiered Intl Singapore. 0-32K: $1.2/$6. 32-128K: $2.4/$12. 128-252K: $3/$15. Implicit cache 20% → $0.24. Explicit cache hit 10% → $0.12.",alibabacloud.com/help/en/model-studio/model-pricing + /context-cache
+glm-5,1.00,0.20,3.20,"Z.ai official. Cached Input Storage: Limited-time Free.",docs.z.ai/guides/overview/pricing
+glm-5.1,1.40,0.26,4.40,"Z.ai official. Cached Input Storage: Limited-time Free.",docs.z.ai/guides/overview/pricing
+MiniMax-M2.5,0.30,0.03,1.20,"Official MiniMax paygo. Cache write: $0.375. Highspeed variant: $0.6/$2.4.",platform.minimax.io/docs/guides/pricing-paygo
+MiniMax-M2.7,0.30,0.06,1.20,"Official MiniMax paygo. Cache write: $0.375. Highspeed variant: $0.6/$2.4.",platform.minimax.io/docs/guides/pricing-paygo

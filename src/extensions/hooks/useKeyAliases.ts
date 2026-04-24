@@ -46,10 +46,12 @@ export function useKeyAliases(): UseKeyAliasesState {
     const next = await writeAliasApi(apiKey, alias);
     if (mountedRef.current) {
       setAliases(next);
-      // Sync the global config cache so sidebar / ConfigPage re-read the latest
-      // YAML (which now contains our new ui-aliases:) on next refresh.
+      // Invalidate the config cache so next ConfigPage/sidebar read picks up
+      // the fresh YAML. Must be section-scoped — the argumentless form also
+      // wipes `config` to null, which would briefly flash every API key as
+      // "removed" on the UsersPage until the next re-fetch lands.
       try {
-        useConfigStore.getState().clearCache();
+        useConfigStore.getState().clearCache('api-keys');
       } catch {
         /* non-fatal */
       }

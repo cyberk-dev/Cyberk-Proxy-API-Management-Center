@@ -393,7 +393,12 @@ export function PageTransition({
               <PageTransitionLayerContext.Provider
                 value={PAGE_TRANSITION_LAYER_CONTEXT_VALUES[layer.status]}
               >
-                {render(layer.location)}
+                {/* Current layer uses the live location so descendants that
+                    read useLocation/useSearchParams observe query/hash
+                    changes within the same pathname. Exiting and stacked
+                    layers keep their cached location so their animation
+                    frames don't swap content mid-transition. */}
+                {render(layer.status === 'current' ? location : layer.location)}
               </PageTransitionLayerContext.Provider>
             </div>
           );

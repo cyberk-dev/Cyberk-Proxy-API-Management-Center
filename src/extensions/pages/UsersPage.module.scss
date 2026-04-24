@@ -251,3 +251,33 @@
   text-align: center;
   color: var(--text-secondary);
 }
+
+.refreshBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.refreshBtn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.refreshBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}

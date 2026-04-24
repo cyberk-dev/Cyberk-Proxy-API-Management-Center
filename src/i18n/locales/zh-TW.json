@@ -1012,6 +1012,7 @@
     "model_price_cache": "快取定價",
     "model_price_save": "儲存定價",
     "model_price_empty": "尚未設定任何模型定價",
+    "model_price_default_note": "常見模型未手動設定價格時會使用內建預設值。如需覆蓋,請在上方新增一列。",
     "model_price_model": "模型",
     "model_price_saved": "模型定價已儲存",
     "model_price_model_required": "請選擇要設定定價的模型",

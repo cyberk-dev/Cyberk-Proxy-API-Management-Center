@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useUsageData } from '@/components/usage';
-import { IconCheck, IconX } from '@/components/ui/icons';
+import { IconCheck, IconRefreshCw, IconX } from '@/components/ui/icons';
 import {
   collectUsageDetails,
   filterUsageByTimeRange,
+  type ModelPrice,
   type UsageDetail,
   type UsageTimeRange
 } from '@/utils/usage';
+import { maskApiKey } from '@/utils/format';
+import { resolveDefaultModelPrice } from '@/data/defaultModelPrices';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import { configFileApi } from '@/services/api';
 import { useKeyAliases } from '../hooks/useKeyAliases';
@@ -22,8 +25,7 @@ import { resolveKeyByIndex } from '../utils/keyIndex';
 import {
   formatNumber,
   formatCost,
-  formatLastActive,
-  formatLatency
+  formatLastActive
 } from '../utils/keyDisplay';
 import {
   parseRateLimitFromYaml,
@@ -59,6 +61,14 @@ const RANGE_OPTIONS: ReadonlyArray<{ value: UsageTimeRange; labelKey: string }> 
   { value: 'all', labelKey: 'detail.range_all' }
 ];
 
+const RANGE_VALUES: ReadonlySet<string> = new Set(['7h', '24h', '7d', 'all']);
+const DEFAULT_RANGE: UsageTimeRange = '24h';
+const RANGE_QUERY_KEY = 'range';
+
+function parseRange(raw: string | null): UsageTimeRange {
+  return raw && RANGE_VALUES.has(raw) ? (raw as UsageTimeRange) : DEFAULT_RANGE;
+}
+
 function isolateApiKey(usage: unknown, apiKey: string): unknown {
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return usage;
   const u = usage as Record<string, unknown>;
@@ -75,7 +85,7 @@ export function UserDetailPage() {
 
   const { showNotification } = useNotificationStore();
   const config = useConfigStore((s) => s.config);
-  const { usage, loading: usageLoading, modelPrices } = useUsageData();
+  const { usage, loading: usageLoading, modelPrices, loadUsage } = useUsageData();
   const { aliases, saveAlias } = useKeyAliases();
 
   const knownKeys = useMemo(() => config?.apiKeys || [], [config?.apiKeys]);
@@ -85,7 +95,26 @@ export function UserDetailPage() {
   );
   const indexResolved = decodedKey !== '';
 
-  const [range, setRange] = useState<UsageTimeRange>('24h');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const range = parseRange(searchParams.get(RANGE_QUERY_KEY));
+  const setRange = useCallback(
+    (value: UsageTimeRange) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (value === DEFAULT_RANGE) {
+            next.delete(RANGE_QUERY_KEY);
+          } else {
+            next.set(RANGE_QUERY_KEY, value);
+          }
+          return next;
+        },
+        { replace: true }
+      );
+    },
+    [setSearchParams]
+  );
+
   const [rlConfig, setRlConfig] = useState<RateLimitConfig | null>(null);
 
   useEffect(() => {
@@ -127,7 +156,20 @@ export function UserDetailPage() {
     [singleUsage, range]
   );
 
-  const costFn = useMemo(() => makeCostFn(modelPrices), [modelPrices]);
+  // User-configured prices take precedence; fall back to bundled defaults so
+  // unpriced-but-known models still produce a cost instead of $0.
+  const effectiveModelPrices = useMemo(() => {
+    const merged: Record<string, ModelPrice> = { ...modelPrices };
+    for (const d of collectUsageDetails(singleUsage)) {
+      const name = d.__modelName;
+      if (!name || merged[name]) continue;
+      const def = resolveDefaultModelPrice(name);
+      if (def) merged[name] = def;
+    }
+    return merged;
+  }, [modelPrices, singleUsage]);
+
+  const costFn = useMemo(() => makeCostFn(effectiveModelPrices), [effectiveModelPrices]);
 
   const keyStats = useMemo<PerKeyStats | null>(() => {
     const all = pivotByKey(filteredUsage, knownKeys, aliases, costFn);
@@ -141,6 +183,8 @@ export function UserDetailPage() {
   }, [filteredUsage]);
 
   const logVisible = useMemo(() => logEntries.slice(0, LOG_CAP), [logEntries]);
+
+  const maskedKey = useMemo(() => maskApiKey(decodedKey), [decodedKey]);
 
   const beginAliasEdit = () => {
     setAliasDraft(currentAlias ?? '');
@@ -224,13 +268,14 @@ export function UserDetailPage() {
           if (ts < earliest) earliest = ts;
         }
       }
+      if (used <= 0) continue;
       out.push({
         model,
         window: rule.window || '—',
         limit: rule.requests,
         windowMs,
         used,
-        resetsAt: used > 0 ? earliest + windowMs : 0
+        resetsAt: earliest + windowMs
       });
     }
     out.sort((a, b) => a.model.localeCompare(b.model));
@@ -299,9 +344,8 @@ export function UserDetailPage() {
               <div className={styles.titleRow}>
                 <h1
                   className={`${styles.title} ${currentAlias ? '' : styles.titleMono}`}
-                  title={decodedKey}
                 >
-                  {currentAlias || decodedKey}
+                  {currentAlias || maskedKey}
                 </h1>
                 {isOrphan && (
                   <span className={styles.orphanBadge}>{t('users.orphan_badge')}</span>
@@ -320,14 +364,25 @@ export function UserDetailPage() {
               </div>
             )}
             {currentAlias && !editingAlias && (
-              <div className={styles.keyLine} title={decodedKey}>
-                {decodedKey}
-              </div>
+              <div className={styles.keyLine}>{maskedKey}</div>
             )}
           </div>
           <div className={styles.headerActions}>
             <button className={styles.btn} onClick={handleCopy} type="button">
               {t('detail.copy_key')}
+            </button>
+            <button
+              type="button"
+              className={styles.iconBtn}
+              onClick={() => void loadUsage()}
+              disabled={usageLoading}
+              aria-label={t('users.refresh')}
+              title={t('users.refresh')}
+            >
+              <IconRefreshCw
+                size={14}
+                className={usageLoading ? styles.spin : undefined}
+              />
             </button>
           </div>
         </div>
@@ -370,7 +425,7 @@ export function UserDetailPage() {
           </span>
           <span className={styles.statMuted}>
             {keyStats
-              ? `${formatNumber(keyStats.inputTokens)} in / ${formatNumber(keyStats.outputTokens)} out`
+              ? `${formatNumber(keyStats.inputTokens)} ${t('detail.tokens_in')} / ${formatNumber(keyStats.outputTokens)} ${t('detail.tokens_out')} / ${formatNumber(keyStats.cachedTokens)} ${t('detail.tokens_cached')}`
               : ''}
           </span>
         </div>
@@ -378,12 +433,6 @@ export function UserDetailPage() {
           <span className={styles.statLabel}>{t('detail.total_cost')}</span>
           <span className={styles.statValue}>
             {formatCost(keyStats?.totalCost ?? 0)}
-          </span>
-        </div>
-        <div className={styles.statCard}>
-          <span className={styles.statLabel}>{t('detail.last_active')}</span>
-          <span className={styles.statValue} style={{ fontSize: '1rem' }}>
-            {formatLastActive(keyStats?.lastActiveMs ?? 0)}
           </span>
         </div>
       </div>
@@ -398,9 +447,10 @@ export function UserDetailPage() {
             <tr>
               <th>{t('detail.model')}</th>
               <th className={styles.numeric}>{t('detail.requests')}</th>
-              <th className={styles.numeric}>{t('detail.tokens')}</th>
+              <th className={styles.numeric}>{t('detail.col_input')}</th>
+              <th className={styles.numeric}>{t('detail.col_output')}</th>
+              <th className={styles.numeric}>{t('detail.col_cached')}</th>
               <th className={styles.numeric}>{t('detail.cost')}</th>
-              <th>{t('detail.last_active')}</th>
             </tr>
           </thead>
           <tbody>
@@ -408,14 +458,15 @@ export function UserDetailPage() {
               <tr key={m.model}>
                 <td className={styles.mono}>{m.model}</td>
                 <td className={styles.numeric}>{formatNumber(m.requests)}</td>
-                <td className={styles.numeric}>{formatNumber(m.totalTokens)}</td>
+                <td className={styles.numeric}>{formatNumber(m.inputTokens)}</td>
+                <td className={styles.numeric}>{formatNumber(m.outputTokens)}</td>
+                <td className={styles.numeric}>{formatNumber(m.cachedTokens)}</td>
                 <td className={styles.numeric}>{formatCost(m.cost)}</td>
-                <td>{formatLastActive(m.lastActiveMs)}</td>
               </tr>
             ))}
             {(!keyStats || keyStats.perModel.length === 0) && (
               <tr>
-                <td colSpan={5} className={styles.emptyState}>
+                <td colSpan={6} className={styles.emptyState}>
                   {t('users.empty')}
                 </td>
               </tr>
@@ -477,36 +528,40 @@ export function UserDetailPage() {
               <tr>
                 <th>{t('detail.log_timestamp')}</th>
                 <th>{t('detail.log_model')}</th>
-                <th className={styles.numeric}>{t('detail.log_latency')}</th>
                 <th className={styles.numeric}>{t('detail.log_tokens_in')}</th>
                 <th className={styles.numeric}>{t('detail.log_tokens_out')}</th>
+                <th className={styles.numeric}>{t('detail.log_tokens_cached')}</th>
                 <th>{t('detail.log_status')}</th>
-                <th>{t('detail.log_source')}</th>
               </tr>
             </thead>
             <tbody>
-              {logVisible.map((d, idx) => (
-                <tr key={`${d.timestamp}-${idx}`}>
-                  <td>{new Date(d.timestamp).toLocaleString()}</td>
-                  <td className={styles.mono}>{d.__modelName ?? '—'}</td>
-                  <td className={styles.numeric}>{formatLatency(d.latency_ms)}</td>
-                  <td className={styles.numeric}>
-                    {formatNumber(d.tokens?.input_tokens ?? 0)}
-                  </td>
-                  <td className={styles.numeric}>
-                    {formatNumber(d.tokens?.output_tokens ?? 0)}
-                  </td>
-                  <td>
-                    <span className={d.failed ? styles.badgeFailed : styles.badgeOk}>
-                      {d.failed ? t('detail.log_failed') : t('detail.log_ok')}
-                    </span>
-                  </td>
-                  <td className={styles.mono}>{d.source || '—'}</td>
-                </tr>
-              ))}
+              {logVisible.map((d, idx) => {
+                const cached = Math.max(
+                  d.tokens?.cached_tokens ?? 0,
+                  d.tokens?.cache_tokens ?? 0
+                );
+                return (
+                  <tr key={`${d.timestamp}-${idx}`}>
+                    <td>{new Date(d.timestamp).toLocaleString()}</td>
+                    <td className={styles.mono}>{d.__modelName ?? '—'}</td>
+                    <td className={styles.numeric}>
+                      {formatNumber(d.tokens?.input_tokens ?? 0)}
+                    </td>
+                    <td className={styles.numeric}>
+                      {formatNumber(d.tokens?.output_tokens ?? 0)}
+                    </td>
+                    <td className={styles.numeric}>{formatNumber(cached)}</td>
+                    <td>
+                      <span className={d.failed ? styles.badgeFailed : styles.badgeOk}>
+                        {d.failed ? t('detail.log_failed') : t('detail.log_ok')}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
               {logVisible.length === 0 && (
                 <tr>
-                  <td colSpan={7} className={styles.emptyState}>
+                  <td colSpan={6} className={styles.emptyState}>
                     {t('users.empty')}
                   </td>
                 </tr>

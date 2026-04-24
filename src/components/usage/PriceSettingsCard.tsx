@@ -146,6 +146,7 @@ export function PriceSettingsCard({
         {/* Saved Prices List */}
         <div className={styles.pricesList}>
           <h4 className={styles.pricesTitle}>{t('usage_stats.saved_prices')}</h4>
+          <div className={styles.hint}>{t('usage_stats.model_price_default_note')}</div>
           {Object.keys(modelPrices).length > 0 ? (
             <div className={styles.pricesGrid}>
               {Object.entries(modelPrices).map(([model, price]) => (

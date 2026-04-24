@@ -984,6 +984,7 @@
     "model_price_cache": "Cache price",
     "model_price_save": "Save Price",
     "model_price_empty": "No model prices set",
+    "model_price_default_note": "Built-in defaults are used for common models when no override is saved. Add a row here to override.",
     "model_price_model": "Model",
     "model_price_saved": "Model price saved",
     "model_price_model_required": "Please choose a model to set pricing",

@@ -35,6 +35,7 @@ export interface PerKeyModelStats {
   failureCount: number;
   inputTokens: number;
   outputTokens: number;
+  cachedTokens: number;
   totalTokens: number;
   cost: number;
   lastActiveMs: number;
@@ -48,6 +49,7 @@ export interface PerKeyStats {
   failureCount: number;
   inputTokens: number;
   outputTokens: number;
+  cachedTokens: number;
   totalTokens: number;
   totalCost: number;
   lastActiveMs: number;
@@ -80,6 +82,7 @@ function newModelStats(model: string): PerKeyModelStats {
     failureCount: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cachedTokens: 0,
     totalTokens: 0,
     cost: 0,
     lastActiveMs: 0
@@ -135,6 +138,7 @@ export function pivotByKey(
       failureCount: 0,
       inputTokens: 0,
       outputTokens: 0,
+      cachedTokens: 0,
       totalTokens: 0,
       totalCost: 0,
       lastActiveMs: 0,
@@ -158,6 +162,10 @@ export function pivotByKey(
         const tokensRaw = (isRecord(raw.tokens) ? raw.tokens : {}) as TokenBundle;
         const inputT = safeNumber(tokensRaw.input_tokens);
         const outT = safeNumber(tokensRaw.output_tokens);
+        const cachedT = Math.max(
+          safeNumber(tokensRaw.cached_tokens),
+          safeNumber(tokensRaw.cache_tokens)
+        );
         const totalT = safeNumber(tokensRaw.total_tokens) || inputT + outT;
         const failed = raw.failed === true;
         const tsMs = parseTsMs(raw.timestamp);
@@ -168,6 +176,7 @@ export function pivotByKey(
         else m.successCount += 1;
         m.inputTokens += inputT;
         m.outputTokens += outT;
+        m.cachedTokens += cachedT;
         m.totalTokens += totalT;
         m.cost += cost;
         if (tsMs > m.lastActiveMs) m.lastActiveMs = tsMs;
@@ -177,6 +186,7 @@ export function pivotByKey(
         else stats.successCount += 1;
         stats.inputTokens += inputT;
         stats.outputTokens += outT;
+        stats.cachedTokens += cachedT;
         stats.totalTokens += totalT;
         stats.totalCost += cost;
         if (tsMs > stats.lastActiveMs) stats.lastActiveMs = tsMs;

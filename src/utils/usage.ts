@@ -14,6 +14,7 @@ import {
 } from './usage/latency';
 import { maskApiKey } from './format';
 import { parseTimestampMs } from './timestamp';
+import { resolveModelPrice } from '@/data/defaultModelPrices';
 
 export type { DurationFormatOptions, LatencyStats } from './usage/latency';
 export {
@@ -777,7 +778,7 @@ export function calculateCost(
   modelPrices: Record<string, ModelPrice>
 ): number {
   const modelName = detail.__modelName || '';
-  const price = modelPrices[modelName];
+  const price = resolveModelPrice(modelName, modelPrices);
   if (!price) {
     return 0;
   }
@@ -813,7 +814,7 @@ export function calculateTotalCost(
   modelPrices: Record<string, ModelPrice>
 ): number {
   const details = collectUsageDetails(usageData);
-  if (!details.length || !Object.keys(modelPrices).length) {
+  if (!details.length) {
     return 0;
   }
   return details.reduce((sum, detail) => sum + calculateCost(detail, modelPrices), 0);
@@ -921,7 +922,7 @@ export function getApiStats(
         failureCount += Number(modelData.failure_count) || 0;
       }
 
-      const price = modelPrices[modelName];
+      const price = resolveModelPrice(modelName, modelPrices);
       if (details.length > 0 && (!hasExplicitCounts || price)) {
         details.forEach((detail) => {
           const detailRecord = isRecord(detail) ? detail : null;
@@ -1018,7 +1019,7 @@ export function getModelStats(
 
       const details = Array.isArray(modelData.details) ? modelData.details : [];
 
-      const price = modelPrices[modelName];
+      const price = resolveModelPrice(modelName, modelPrices);
 
       const hasExplicitCounts =
         typeof modelData.success_count === 'number' || typeof modelData.failure_count === 'number';

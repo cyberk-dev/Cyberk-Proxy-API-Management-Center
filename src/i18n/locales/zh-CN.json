@@ -984,6 +984,7 @@
     "model_price_cache": "缓存价格",
     "model_price_save": "保存价格",
     "model_price_empty": "暂未设置任何模型价格",
+    "model_price_default_note": "常见模型未手动设置价格时会使用内置默认值。如需覆盖,请在上方新增一行。",
     "model_price_model": "模型",
     "model_price_saved": "模型价格已保存",
     "model_price_model_required": "请选择要设置价格的模型",
