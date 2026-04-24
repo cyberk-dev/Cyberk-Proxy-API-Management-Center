@@ -38,33 +38,103 @@
   justify-content: space-between;
 }
 
-.keyLabel {
-  font-family: $font-mono;
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-  user-select: all;
-  word-break: break-all;
-}
-
-.aliasBlock {
+.identityBlock {
   display: flex;
   flex-direction: column;
-  gap: $spacing-xs;
+  gap: 6px;
   flex: 1;
-  min-width: 260px;
+  min-width: 0;
 }
 
-.aliasInline {
+.titleRow {
   display: flex;
   align-items: center;
   gap: $spacing-sm;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
-.aliasInlineTitle {
+.title {
   margin: 0;
   font-size: 1.5rem;
   font-weight: 600;
   color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titleMono {
+  font-family: $font-mono;
+  font-size: 1.05rem;
+  font-weight: 500;
+  word-break: break-all;
+  white-space: normal;
+}
+
+.titleEditRow {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+}
+
+.titleInput {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 1rem;
+  font-weight: 500;
+  min-width: 180px;
+}
+
+.keyLine {
+  font-family: $font-mono;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  user-select: all;
+  word-break: break-all;
+  line-height: 1.3;
+}
+
+.iconBtn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.iconBtn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.iconBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.iconBtnPrimary {
+  background: var(--primary-color);
+  color: var(--primary-contrast);
+  border-color: var(--primary-color);
+}
+
+.iconBtnPrimary:hover {
+  background: var(--primary-color);
+  color: var(--primary-contrast);
+  opacity: 0.9;
 }
 
 .orphanBadge {
@@ -270,3 +340,4 @@
   font-family: $font-mono;
   font-size: 0.8125rem;
 }
+

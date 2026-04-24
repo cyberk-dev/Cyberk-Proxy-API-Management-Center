@@ -1,6 +1,25 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { IconCheck, IconX } from '@/components/ui/icons';
 import styles from '../pages/UsersPage.module.scss';
+
+function IconPencil({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+    </svg>
+  );
+}
 
 interface AliasEditorProps {
   apiKey: string;
@@ -75,52 +94,60 @@ export function AliasEditor({
   if (editing) {
     return (
       <div className={styles.aliasEditor} onClick={handleRowClick}>
-        <input
-          ref={inputRef}
-          className={styles.aliasInput}
-          type="text"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={handleKey}
-          placeholder={t('users.set_alias')}
-          disabled={saving}
-          maxLength={64}
-        />
-        <button
-          className={`${styles.miniBtn} ${styles.miniBtnPrimary}`}
-          onClick={() => void commit()}
-          disabled={saving}
-          type="button"
-        >
-          {saving ? '…' : t('users.save')}
-        </button>
-        <button
-          className={styles.miniBtn}
-          onClick={cancel}
-          disabled={saving}
-          type="button"
-        >
-          {t('users.cancel')}
-        </button>
+        <div className={styles.aliasEditorRow}>
+          <input
+            ref={inputRef}
+            className={styles.aliasInput}
+            type="text"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={handleKey}
+            placeholder={t('users.set_alias')}
+            disabled={saving}
+            maxLength={64}
+          />
+          <button
+            className={`${styles.iconBtn} ${styles.iconBtnPrimary}`}
+            onClick={() => void commit()}
+            disabled={saving}
+            type="button"
+            aria-label={t('users.save')}
+            title={t('users.save')}
+          >
+            <IconCheck size={14} />
+          </button>
+          <button
+            className={styles.iconBtn}
+            onClick={cancel}
+            disabled={saving}
+            type="button"
+            aria-label={t('users.cancel')}
+            title={t('users.cancel')}
+          >
+            <IconX size={14} />
+          </button>
+        </div>
+        <div className={styles.aliasEditorHint} title={apiKey}>
+          {apiKey}
+        </div>
       </div>
     );
   }
 
   return (
     <div className={styles.aliasView} onClick={handleRowClick}>
-      {value ? (
-        <span className={styles.aliasText}>{value}</span>
-      ) : (
-        <span className={styles.aliasMuted}>{t('users.no_alias')}</span>
-      )}
+      <span className={value ? styles.aliasText : styles.aliasKeyFallback} title={apiKey}>
+        {value ?? apiKey}
+      </span>
       {!disabled && (
         <button
-          className={styles.aliasEditBtn}
+          className={styles.iconBtn}
           onClick={beginEdit}
           type="button"
           aria-label={t('users.edit_alias')}
+          title={t('users.edit_alias')}
         >
-          {t('users.edit_alias')}
+          <IconPencil size={13} />
         </button>
       )}
     </div>

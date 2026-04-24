@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useUsageData } from '@/components/usage';
+import { IconCheck, IconX } from '@/components/ui/icons';
 import {
   collectUsageDetails,
   filterUsageByTimeRange,
@@ -17,8 +18,8 @@ import {
   makeCostFn,
   type PerKeyStats
 } from '../utils/keyPivot';
+import { resolveKeyByIndex } from '../utils/keyIndex';
 import {
-  maskKey,
   formatNumber,
   formatCost,
   formatLastActive,
@@ -29,10 +30,27 @@ import {
   resolveRateLimit,
   type RateLimitConfig
 } from '../services/ratelimitConfig';
-import { AliasEditor } from '../components/AliasEditor';
 import styles from './UserDetailPage.module.scss';
 
 const LOG_CAP = 500;
+
+function IconPencil({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+    </svg>
+  );
+}
 
 const RANGE_OPTIONS: ReadonlyArray<{ value: UsageTimeRange; labelKey: string }> = [
   { value: '7h', labelKey: 'detail.range_7h' },
@@ -53,19 +71,19 @@ function isolateApiKey(usage: unknown, apiKey: string): unknown {
 export function UserDetailPage() {
   const { t } = useTranslation('extensions');
   const navigate = useNavigate();
-  const { apiKey = '' } = useParams<{ apiKey: string }>();
-  const decodedKey = useMemo(() => {
-    try {
-      return decodeURIComponent(apiKey);
-    } catch {
-      return apiKey;
-    }
-  }, [apiKey]);
+  const { index = '' } = useParams<{ index: string }>();
 
   const { showNotification } = useNotificationStore();
   const config = useConfigStore((s) => s.config);
   const { usage, loading: usageLoading, modelPrices } = useUsageData();
   const { aliases, saveAlias } = useKeyAliases();
+
+  const knownKeys = useMemo(() => config?.apiKeys || [], [config?.apiKeys]);
+  const decodedKey = useMemo(
+    () => resolveKeyByIndex(index, knownKeys, usage) ?? '',
+    [index, knownKeys, usage]
+  );
+  const indexResolved = decodedKey !== '';
 
   const [range, setRange] = useState<UsageTimeRange>('24h');
   const [rlConfig, setRlConfig] = useState<RateLimitConfig | null>(null);
@@ -85,8 +103,22 @@ export function UserDetailPage() {
     };
   }, []);
 
-  const knownKeys = useMemo(() => config?.apiKeys || [], [config?.apiKeys]);
-  const isOrphan = knownKeys.length > 0 && !knownKeys.includes(decodedKey);
+  const isOrphan =
+    indexResolved && knownKeys.length > 0 && !knownKeys.includes(decodedKey);
+
+  const currentAlias = aliases[decodedKey];
+  const [editingAlias, setEditingAlias] = useState(false);
+  const [aliasDraft, setAliasDraft] = useState('');
+  const [aliasSaving, setAliasSaving] = useState(false);
+  const aliasInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (editingAlias && aliasInputRef.current) {
+      aliasInputRef.current.focus();
+      aliasInputRef.current.select();
+    }
+  }, [editingAlias]);
+
 
   const singleUsage = useMemo(() => isolateApiKey(usage, decodedKey), [usage, decodedKey]);
 
@@ -110,13 +142,39 @@ export function UserDetailPage() {
 
   const logVisible = useMemo(() => logEntries.slice(0, LOG_CAP), [logEntries]);
 
-  const onSaveAlias = async (key: string, alias: string) => {
-    await saveAlias(key, alias);
-    showNotification(t('users.save_success'), 'success');
+  const beginAliasEdit = () => {
+    setAliasDraft(currentAlias ?? '');
+    setEditingAlias(true);
   };
 
-  const onSaveAliasError = (msg: string) => {
-    showNotification(`${t('users.save_failed')}: ${msg}`, 'error');
+  const cancelAliasEdit = () => {
+    setEditingAlias(false);
+    setAliasDraft('');
+  };
+
+  const commitAliasEdit = async () => {
+    if (aliasSaving) return;
+    setAliasSaving(true);
+    try {
+      await saveAlias(decodedKey, aliasDraft);
+      showNotification(t('users.save_success'), 'success');
+      setEditingAlias(false);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : t('users.save_failed');
+      showNotification(`${t('users.save_failed')}: ${msg}`, 'error');
+    } finally {
+      setAliasSaving(false);
+    }
+  };
+
+  const handleAliasKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void commitAliasEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelAliasEdit();
+    }
   };
 
   const handleCopy = async () => {
@@ -202,23 +260,70 @@ export function UserDetailPage() {
 
       <div className={styles.pageHeader}>
         <div className={styles.headerRow}>
-          <div className={styles.aliasBlock}>
-            <div className={styles.aliasInline}>
-              <h1 className={styles.aliasInlineTitle}>
-                {aliases[decodedKey] || t('users.no_alias')}
-              </h1>
-              {isOrphan && (
-                <span className={styles.orphanBadge}>{t('users.orphan_badge')}</span>
-              )}
-            </div>
-            <div className={styles.keyLabel}>{maskKey(decodedKey)}</div>
-            <AliasEditor
-              apiKey={decodedKey}
-              value={aliases[decodedKey]}
-              onSave={onSaveAlias}
-              onError={onSaveAliasError}
-              disabled={isOrphan}
-            />
+          <div className={styles.identityBlock}>
+            {editingAlias ? (
+              <div className={styles.titleEditRow}>
+                <input
+                  ref={aliasInputRef}
+                  className={styles.titleInput}
+                  type="text"
+                  value={aliasDraft}
+                  onChange={(e) => setAliasDraft(e.target.value)}
+                  onKeyDown={handleAliasKeyDown}
+                  placeholder={t('detail.alias_placeholder')}
+                  disabled={aliasSaving}
+                  maxLength={64}
+                />
+                <button
+                  className={`${styles.iconBtn} ${styles.iconBtnPrimary}`}
+                  onClick={() => void commitAliasEdit()}
+                  disabled={aliasSaving}
+                  type="button"
+                  aria-label={t('users.save')}
+                  title={t('users.save')}
+                >
+                  <IconCheck size={14} />
+                </button>
+                <button
+                  className={styles.iconBtn}
+                  onClick={cancelAliasEdit}
+                  disabled={aliasSaving}
+                  type="button"
+                  aria-label={t('users.cancel')}
+                  title={t('users.cancel')}
+                >
+                  <IconX size={14} />
+                </button>
+              </div>
+            ) : (
+              <div className={styles.titleRow}>
+                <h1
+                  className={`${styles.title} ${currentAlias ? '' : styles.titleMono}`}
+                  title={decodedKey}
+                >
+                  {currentAlias || decodedKey}
+                </h1>
+                {isOrphan && (
+                  <span className={styles.orphanBadge}>{t('users.orphan_badge')}</span>
+                )}
+                {!isOrphan && indexResolved && (
+                  <button
+                    className={styles.iconBtn}
+                    onClick={beginAliasEdit}
+                    type="button"
+                    aria-label={t('users.edit_alias')}
+                    title={t('users.edit_alias')}
+                  >
+                    <IconPencil size={13} />
+                  </button>
+                )}
+              </div>
+            )}
+            {currentAlias && !editingAlias && (
+              <div className={styles.keyLine} title={decodedKey}>
+                {decodedKey}
+              </div>
+            )}
           </div>
           <div className={styles.headerActions}>
             <button className={styles.btn} onClick={handleCopy} type="button">

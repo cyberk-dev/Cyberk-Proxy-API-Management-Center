@@ -44,6 +44,23 @@
   min-width: 220px;
 }
 
+.timeRangeGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-xs;
+  flex-wrap: nowrap;
+}
+
+.timeRangeLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.timeRangeSelectControl {
+  min-width: 120px;
+}
+
 .errorBox {
   padding: $spacing-sm $spacing-md;
   background: var(--bg-error-light);
@@ -101,42 +118,55 @@
 }
 
 .aliasCell {
-  max-width: 260px;
+  min-width: 80px;
 }
 
 .aliasView {
   display: flex;
   align-items: center;
   gap: $spacing-xs;
+  min-width: 0;
+}
+
+.aliasView > .aliasText,
+.aliasView > .aliasKeyFallback {
+  min-width: 0;
+  flex: 1;
 }
 
 .aliasText {
   font-weight: 500;
 }
 
-.aliasMuted {
-  color: var(--text-tertiary);
-  font-style: italic;
-}
-
-.aliasEditBtn {
-  background: none;
-  border: none;
-  color: var(--primary-color);
-  cursor: pointer;
+.aliasKeyFallback {
+  font-family: $font-mono;
   font-size: 0.75rem;
-  padding: 2px 6px;
-  border-radius: var(--radius-md);
-}
-
-.aliasEditBtn:hover {
-  background: var(--bg-hover);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .aliasEditor {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.aliasEditorRow {
+  display: flex;
   gap: $spacing-xs;
   align-items: center;
+}
+
+.aliasEditorHint {
+  font-family: $font-mono;
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .aliasInput {
@@ -150,34 +180,41 @@
   min-width: 140px;
 }
 
-.miniBtn {
-  padding: 4px 10px;
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border: 1px solid var(--border-color);
   background: var(--bg-secondary);
-  color: var(--text-primary);
+  color: var(--text-secondary);
   border-radius: var(--radius-md);
-  font-size: 0.75rem;
   cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-.miniBtn:hover {
+.iconBtn:hover:not(:disabled) {
   background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
-.miniBtnPrimary {
+.iconBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.iconBtnPrimary {
   background: var(--primary-color);
   color: var(--primary-contrast);
   border-color: var(--primary-color);
 }
 
-.miniBtnPrimary:hover {
+.iconBtnPrimary:hover:not(:disabled) {
   background: var(--primary-hover);
-}
-
-.keyCell {
-  font-family: $font-mono;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
+  color: var(--primary-contrast);
 }
 
 .orphanBadge {
@@ -191,15 +228,6 @@
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-}
-
-.modelsCell {
-  color: var(--text-secondary);
-  font-size: 0.75rem;
-}
-
-.modelsCellMore {
-  color: var(--text-tertiary);
 }
 
 .sectionLabel {

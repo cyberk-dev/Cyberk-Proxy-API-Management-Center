@@ -10,5 +10,5 @@ const UserDetailPage = lazy(() =>
 
 export const extensionRoutes: RouteObject[] = [
   { path: '/custom/users', element: <UsersPage /> },
-  { path: '/custom/users/:apiKey', element: <UserDetailPage /> }
+  { path: '/custom/users/:index', element: <UserDetailPage /> }
 ];

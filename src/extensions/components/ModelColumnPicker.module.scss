@@ -1,0 +1,127 @@
+@use '../../styles/variables' as *;
+
+.root {
+  position: relative;
+  display: inline-block;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: $spacing-xs;
+  white-space: nowrap;
+}
+
+.triggerLabel {
+  font-size: 0.8125rem;
+}
+
+.panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 320px;
+  max-width: 420px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md, 0 8px 24px rgba(0, 0, 0, 0.12));
+  padding: $spacing-sm;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.searchRow {
+  display: flex;
+}
+
+.searchInput {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+}
+
+.searchInput:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+.actionsRow {
+  display: flex;
+  gap: $spacing-xs;
+  padding-bottom: $spacing-xs;
+  border-bottom: 1px dashed var(--border-color);
+}
+
+.actionBtn {
+  padding: 3px 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.actionBtn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.actionBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.list {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.empty {
+  padding: $spacing-md;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: $spacing-sm;
+  padding: 6px 4px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+}
+
+.row:hover {
+  background: var(--bg-hover);
+}
+
+.rowName {
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: $font-mono;
+}
+
+.rowCount {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
+}
