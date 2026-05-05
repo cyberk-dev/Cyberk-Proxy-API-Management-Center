@@ -1,4 +1,8 @@
-import type { ModelPrice } from '@/utils/usage';
+export interface ModelPrice {
+  prompt: number;
+  completion: number;
+  cache: number;
+}
 
 // Prices in USD per 1M tokens. Source: docs/model-pricing.csv (2026-04-24).
 // Keep `completion` (output) and `cache` (cache read) aligned with how

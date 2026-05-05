@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useUsageData } from '@/components/usage';
+import { useUsageData } from '../hooks/useUsageData';
 import { IconCheck, IconRefreshCw, IconX } from '@/components/ui/icons';
 import {
   collectUsageDetails,
@@ -9,7 +9,7 @@ import {
   type ModelPrice,
   type UsageDetail,
   type UsageTimeRange
-} from '@/utils/usage';
+} from '../utils/usageCompat';
 import { getNewInputTokens } from '../utils/tokenSemantics';
 import { maskApiKey } from '@/utils/format';
 import { resolveDefaultModelPrice } from '@/data/defaultModelPrices';

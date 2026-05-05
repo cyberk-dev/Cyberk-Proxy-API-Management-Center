@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useUsageData } from '@/components/usage';
+import { useUsageData } from '../hooks/useUsageData';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import { Select } from '@/components/ui/Select';
 import { IconRefreshCw } from '@/components/ui/icons';
-import { collectUsageDetails, type ModelPrice } from '@/utils/usage';
+import { collectUsageDetails, type ModelPrice } from '../utils/usageCompat';
 import { resolveDefaultModelPrice } from '@/data/defaultModelPrices';
 import { useKeyAliases } from '../hooks/useKeyAliases';
 import { makeCostFn, pivotByKey, type PerKeyStats } from '../utils/keyPivot';
