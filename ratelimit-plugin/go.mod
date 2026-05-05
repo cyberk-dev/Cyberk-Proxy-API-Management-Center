@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gin-gonic/gin v1.12.0
-	github.com/router-for-me/CLIProxyAPI/v6 v6.9.34
+	github.com/router-for-me/CLIProxyAPI/v6 v6.9.37
 	github.com/sirupsen/logrus v1.9.4
 	github.com/tidwall/gjson v1.18.0
 	gopkg.in/yaml.v3 v3.0.1

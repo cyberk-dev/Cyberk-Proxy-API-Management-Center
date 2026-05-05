@@ -17,6 +17,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	// Side-effect import: registers every built-in request/response translator
+	// (claude→codex, openai→codex, etc.) into the default translator registry.
+	// Without this, codex_executor's TranslateRequest falls through to the
+	// no-op fallback and the raw Anthropic /v1/messages body gets sent to
+	// chatgpt.com/backend-api/codex/responses, which rejects it. Stock
+	// cmd/server/main.go does this via internal/translator; plugins use the
+	// public sdk/translator/builtin alias.
+	_ "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator/builtin"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"

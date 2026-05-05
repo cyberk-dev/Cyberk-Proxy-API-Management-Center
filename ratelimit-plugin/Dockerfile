@@ -7,11 +7,13 @@ RUN go mod download
 
 COPY . .
 
-# Auto-bump upstream CLIProxyAPI SDK to latest when BUMP_SDK=true.
-# BUMP_TS (unix timestamp) is passed by cyberk-worker.sh every run to bust
-# Docker's layer cache so `go get` re-checks proxy.golang.org each deploy.
-# Without BUMP_SDK=true, the pinned version in go.mod is used (default).
-ARG BUMP_SDK=false
+# Auto-bump upstream CLIProxyAPI SDK to latest. BUMP_TS (unix timestamp) is
+# passed by cyberk-worker.sh every run to bust Docker's layer cache so
+# `go get` re-checks proxy.golang.org each deploy. Default is true so manual
+# `docker build .` (no flags) also tracks latest — go.mod's pinned version
+# acts as a floor, not the runtime version. Pass --build-arg BUMP_SDK=false
+# to opt out and use go.mod verbatim (e.g. for reproducing a past build).
+ARG BUMP_SDK=true
 ARG BUMP_TS=0
 RUN if [ "$BUMP_SDK" = "true" ]; then \
       echo "bump SDK at ts=${BUMP_TS}" && \
