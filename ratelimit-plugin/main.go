@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -28,6 +30,8 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
+	"github.com/cyberk/ratelimit-plugin/internal/usagepush"
+	"github.com/cyberk/ratelimit-plugin/internal/usagestore"
 	"github.com/cyberk/ratelimit-plugin/internal/weightedselector"
 )
 
@@ -123,10 +127,19 @@ func main() {
 
 	mw := ratelimit.Middleware(store, limiter)
 
+	ustore := usagestore.New()
+	ustore.RegisterPlugin()
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(absCfg).
-		WithServerOptions(api.WithMiddleware(mw))
+		WithServerOptions(
+			api.WithMiddleware(mw),
+			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, c *config.Config) {
+				usagepush.Register(engine, c)
+				usagestore.RegisterRoutes(engine, c, ustore)
+			}),
+		)
 
 	wcfg, werr := weightedselector.LoadFromYAML(absCfg)
 	if werr != nil {
