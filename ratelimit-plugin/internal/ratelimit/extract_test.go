@@ -133,10 +133,12 @@ func TestExtractModel_MultipartSkipped(t *testing.T) {
 }
 
 func TestExtractModel_LargeBodyMultiReader(t *testing.T) {
-	// Build 2 MiB JSON with model at start.
+	// Build a body strictly larger than maxBodyPeek (4 MiB) so the peek
+	// fills its buffer and the request body is reconstructed via MultiReader.
+	// The "model" field is at the start so it falls inside the peek window.
 	var buf bytes.Buffer
 	buf.WriteString(`{"model":"gpt-4","padding":"`)
-	buf.WriteString(strings.Repeat("x", 2<<20))
+	buf.WriteString(strings.Repeat("x", 5<<20))
 	buf.WriteString(`"}`)
 	original := buf.Bytes()
 
@@ -172,5 +174,51 @@ func TestExtractModel_EmptyBody(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	if got := ExtractModel(makeGinCtx(r)); got != "" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestPeekJSONBodyResult_TruncatedFlag(t *testing.T) {
+	var buf bytes.Buffer
+	buf.WriteString(`{"model":"gpt-4","padding":"`)
+	buf.WriteString(strings.Repeat("x", 5<<20))
+	buf.WriteString(`"}`)
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(buf.Bytes()))
+	r.Header.Set("Content-Type", "application/json")
+
+	res := PeekJSONBodyResult(makeGinCtx(r))
+	if !res.Truncated {
+		t.Errorf("expected Truncated=true for body > maxBodyPeek")
+	}
+	if int64(len(res.Body)) != maxBodyPeek {
+		t.Errorf("expected peek len == maxBodyPeek (%d), got %d", maxBodyPeek, len(res.Body))
+	}
+}
+
+func TestPeekJSONBodyResult_NotTruncated(t *testing.T) {
+	body := []byte(`{"model":"gpt-4","service_tier":"priority"}`)
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+
+	res := PeekJSONBodyResult(makeGinCtx(r))
+	if res.Truncated {
+		t.Errorf("expected Truncated=false for small body")
+	}
+	if !bytes.Equal(res.Body, body) {
+		t.Errorf("body roundtrip mismatch")
+	}
+}
+
+func TestPeekJSONBodyResult_CachesResult(t *testing.T) {
+	body := []byte(`{"model":"gpt-4"}`)
+	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	c := makeGinCtx(r)
+
+	first := PeekJSONBodyResult(c)
+	// Drain c.Request.Body so a second uncached read would return empty.
+	_, _ = io.Copy(io.Discard, c.Request.Body)
+	second := PeekJSONBodyResult(c)
+	if !bytes.Equal(first.Body, second.Body) {
+		t.Error("cache miss: second peek differs from first")
 	}
 }

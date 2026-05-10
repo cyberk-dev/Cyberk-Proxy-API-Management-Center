@@ -50,6 +50,25 @@ ratelimit:
     gemini-2.5-pro:
       requests: 200
 
+# ── Policy: block specific request shapes (optional) ─────────────────────────
+# Reject requests whose JSON body carries a forbidden field value, regardless
+# of API key or model. Runs BEFORE rate-limit accounting, so a blocked request
+# never consumes per-key quota.
+#
+# Currently supported:
+#   block_service_tiers — list of OpenAI `service_tier` values to reject.
+#     OpenAI's "priority" tier costs ~2× the quota of "default", so operators
+#     often want to disable it across the board. Match is case-insensitive;
+#     missing field always passes through (Anthropic / Gemini routes do not
+#     send service_tier and are unaffected).
+#
+# Omit the block (or leave the list empty) to disable the feature entirely.
+# Rejection format mirrors the rate-limit error so clients see a consistent
+# 400 invalid_request_error shape.
+policy:
+  block_service_tiers:
+    - priority
+
 # ── Weighted routing for Codex (optional) ────────────────────────────────────
 # Distribute Codex requests across upstream accounts proportionally to their
 # subscription weight, derived from the `plan_type` claim embedded in each

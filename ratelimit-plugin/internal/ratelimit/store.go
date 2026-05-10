@@ -70,13 +70,17 @@ func (s *ConfigStore) Watch(ctx context.Context, path string, onReload func(*Con
 			if info.ModTime().Equal(lastMtime) {
 				return
 			}
-			lastMtime = info.ModTime()
 
 			cfg, err := LoadFromFile(path)
 			if err != nil {
+				// Don't advance lastMtime — partial writes (K8s ConfigMap atomic
+				// rename, editor swap files) can momentarily produce malformed
+				// YAML. Leaving lastMtime untouched lets the next event/tick
+				// retry once the writer settles.
 				log.Warnf("ratelimit: reload config: %v", err)
 				return
 			}
+			lastMtime = info.ModTime()
 			s.Set(cfg)
 			if onReload != nil {
 				onReload(cfg)
