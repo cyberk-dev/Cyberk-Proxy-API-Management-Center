@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	// Side-effect import: registers every built-in request/response translator
 	// (claude→codex, openai→codex, etc.) into the default translator registry.
 	// Without this, codex_executor's TranslateRequest falls through to the
@@ -26,7 +26,7 @@ import (
 	// chatgpt.com/backend-api/codex/responses, which rejects it. Stock
 	// cmd/server/main.go does this via internal/translator; plugins use the
 	// public sdk/translator/builtin alias.
-	_ "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator/builtin"
+	_ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/cyberk/ratelimit-plugin/internal/policy"
@@ -213,7 +213,7 @@ func buildWeightedCoreManager(cfg *config.Config, wcfg weightedselector.Config) 
 	sessionAffinityTTL := time.Hour
 	if cfg != nil {
 		strategy = strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy))
-		sessionAffinity = cfg.Routing.ClaudeCodeSessionAffinity || cfg.Routing.SessionAffinity
+		sessionAffinity = cfg.Routing.SessionAffinity
 		if ttlStr := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttlStr != "" {
 			if parsed, err := time.ParseDuration(ttlStr); err == nil && parsed > 0 {
 				sessionAffinityTTL = parsed
