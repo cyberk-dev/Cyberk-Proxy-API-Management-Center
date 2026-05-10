@@ -29,6 +29,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator/builtin"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/cyberk/ratelimit-plugin/internal/policy"
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
 	"github.com/cyberk/ratelimit-plugin/internal/usagepush"
 	"github.com/cyberk/ratelimit-plugin/internal/usagestore"
@@ -62,6 +63,16 @@ func main() {
 	}
 	store := ratelimit.NewConfigStore(rlCfg)
 
+	policyCfg, err := policy.LoadFromFile(absCfg)
+	if err != nil {
+		log.Warnf("policy: load failed, running with empty config: %v", err)
+		policyCfg = &policy.Config{}
+	}
+	policyStore := policy.NewConfigStore(policyCfg)
+	if policyCfg.Enabled() {
+		log.Infof("policy: enabled (block_service_tiers=%v)", policyCfg.BlockServiceTiers)
+	}
+
 	limiter := ratelimit.NewLimiter()
 
 	maxWindow := maxWindowOf(rlCfg)
@@ -78,6 +89,12 @@ func main() {
 		log.Infof("ratelimit: config swapped (top=%dreq/%s models=%d)", c.Requests, c.Window, len(c.Models))
 	}); err != nil {
 		log.Warnf("ratelimit: watcher disabled: %v", err)
+	}
+
+	if err := policyStore.Watch(ctx, absCfg, func(c *policy.Config) {
+		log.Infof("policy: config swapped (block_service_tiers=%v)", c.BlockServiceTiers)
+	}); err != nil {
+		log.Warnf("policy: watcher disabled: %v", err)
 	}
 
 	var persistWG sync.WaitGroup
@@ -125,16 +142,18 @@ func main() {
 		cancel()
 	}()
 
-	mw := ratelimit.Middleware(store, limiter)
-
 	ustore := usagestore.New()
 	ustore.RegisterPlugin()
 
+	// Policy runs first: blocked requests must not consume rate-limit budget.
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(absCfg).
 		WithServerOptions(
-			api.WithMiddleware(mw),
+			api.WithMiddleware(
+				policy.Middleware(policyStore),
+				ratelimit.Middleware(store, limiter),
+			),
 			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, c *config.Config) {
 				usagepush.Register(engine, c)
 				usagestore.RegisterRoutes(engine, c, ustore)
