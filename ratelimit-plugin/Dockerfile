@@ -17,7 +17,7 @@ ARG BUMP_SDK=true
 ARG BUMP_TS=0
 RUN if [ "$BUMP_SDK" = "true" ]; then \
       echo "bump SDK at ts=${BUMP_TS}" && \
-      go get github.com/router-for-me/CLIProxyAPI/v6@latest && \
+      go get github.com/router-for-me/CLIProxyAPI/v7@latest && \
       go mod tidy; \
     fi
 
