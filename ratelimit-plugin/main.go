@@ -164,9 +164,9 @@ func main() {
 	if werr != nil {
 		log.Fatalf("weighted selector: load codex_weights: %v", werr)
 	}
+	mgr := buildCoreManager(cfg, wcfg, store, limiter)
+	builder = builder.WithCoreAuthManager(mgr)
 	if wcfg.Enabled {
-		mgr := buildWeightedCoreManager(cfg, wcfg)
-		builder = builder.WithCoreAuthManager(mgr)
 		log.Infof("weighted selector: enabled for codex (entries=%d)", len(wcfg.Weights))
 	}
 
@@ -186,23 +186,19 @@ func main() {
 	}
 }
 
-// buildWeightedCoreManager mirrors the SDK's default wiring in
-// sdk/cliproxy/builder.go:204-240, but inserts our weighted selector between
-// session-affinity and the round-robin/fill-first base. Composition order:
+// buildCoreManager builds a custom coreauth.Manager with the selector chain:
 //
-//	SessionAffinitySelector (optional, outer)
-//	 └─ WeightedSelector
-//	     ├─ codex → SWRR by plan_type weight
-//	     └─ others → RoundRobin / FillFirst (base)
+//	RateLimitSelector (outermost — WS frame enforcement)
+//	 └─ SessionAffinitySelector (optional)
+//	     └─ WeightedSelector (when codex_weights enabled)
+//	         ├─ codex → SWRR by plan_type weight
+//	         └─ others → RoundRobin / FillFirst (base)
 //
-// Rationale: when session affinity is enabled the operator wants sticky
-// routing to trump everything else — a returning conversation must land on its
-// original auth regardless of weights. Weighted routing kicks in whenever SA
-// delegates to its fallback: (a) on cache-miss for new conversations, AND
-// (b) on cache-hit when the cached auth has become unavailable and SA
-// re-selects (see SDK selector.go:498-512 — it calls s.fallback.Pick with the
-// full auth list, which lands here).
-func buildWeightedCoreManager(cfg *config.Config, wcfg weightedselector.Config) *coreauth.Manager {
+// RateLimitSelector wraps the entire chain to enforce per-frame rate limits on
+// downstream WebSocket connections. HTTP requests are rate-limited by the Gin
+// middleware instead, keeping the two paths disjoint and sharing the same
+// Limiter buckets for aggregate counting.
+func buildCoreManager(cfg *config.Config, wcfg weightedselector.Config, rlStore *ratelimit.ConfigStore, rlLimiter *ratelimit.Limiter) *coreauth.Manager {
 	tokenStore := sdkAuth.GetTokenStore()
 	if setter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && cfg != nil {
 		setter.SetBaseDir(cfg.AuthDir)
@@ -229,13 +225,19 @@ func buildWeightedCoreManager(cfg *config.Config, wcfg weightedselector.Config) 
 		base = &coreauth.RoundRobinSelector{}
 	}
 
-	var selector coreauth.Selector = weightedselector.New(base, wcfg)
+	var selector coreauth.Selector
+	if wcfg.Enabled {
+		selector = weightedselector.New(base, wcfg)
+	} else {
+		selector = base
+	}
 	if sessionAffinity {
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
 			Fallback: selector,
 			TTL:      sessionAffinityTTL,
 		})
 	}
+	selector = ratelimit.NewRateLimitSelector(selector, rlStore, rlLimiter)
 	return coreauth.NewManager(tokenStore, selector, nil)
 }
 
