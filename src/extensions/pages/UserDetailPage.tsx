@@ -70,15 +70,6 @@ function parseRange(raw: string | null): UsageTimeRange {
   return raw && RANGE_VALUES.has(raw) ? (raw as UsageTimeRange) : DEFAULT_RANGE;
 }
 
-function isolateApiKey(usage: unknown, apiKey: string): unknown {
-  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return usage;
-  const u = usage as Record<string, unknown>;
-  const apis = u.apis;
-  if (!apis || typeof apis !== 'object' || Array.isArray(apis)) return usage;
-  const subset = (apis as Record<string, unknown>)[apiKey];
-  return { ...u, apis: subset ? { [apiKey]: subset } : {} };
-}
-
 export function UserDetailPage() {
   const { t } = useTranslation('extensions');
   const navigate = useNavigate();
@@ -86,15 +77,22 @@ export function UserDetailPage() {
 
   const { showNotification } = useNotificationStore();
   const config = useConfigStore((s) => s.config);
-  const { usage, loading: usageLoading, modelPrices, loadUsage } = useUsageData();
+  const { summary, keyUsage, loading: usageLoading, modelPrices, loadSummary, loadKeyUsage } = useUsageData();
   const { aliases, saveAlias } = useKeyAliases();
 
   const knownKeys = useMemo(() => config?.apiKeys || [], [config?.apiKeys]);
+
+  useEffect(() => { void loadSummary(); }, [loadSummary]);
+
   const decodedKey = useMemo(
-    () => resolveKeyByIndex(index, knownKeys, usage) ?? '',
-    [index, knownKeys, usage]
+    () => resolveKeyByIndex(index, knownKeys, summary) ?? '',
+    [index, knownKeys, summary]
   );
   const indexResolved = decodedKey !== '';
+
+  useEffect(() => {
+    if (decodedKey) void loadKeyUsage(decodedKey);
+  }, [decodedKey, loadKeyUsage]);
 
   const [searchParams, setSearchParams] = useSearchParams();
   const range = parseRange(searchParams.get(RANGE_QUERY_KEY));
@@ -150,7 +148,7 @@ export function UserDetailPage() {
   }, [editingAlias]);
 
 
-  const singleUsage = useMemo(() => isolateApiKey(usage, decodedKey), [usage, decodedKey]);
+  const singleUsage = keyUsage;
 
   // Whether the decoded key has any data in the raw usage export (ignoring the
   // current time-range filter). Used to decide between "truly not found" and
@@ -391,7 +389,7 @@ export function UserDetailPage() {
             <button
               type="button"
               className={styles.iconBtn}
-              onClick={() => void loadUsage()}
+              onClick={() => { if (decodedKey) void loadKeyUsage(decodedKey); }}
               disabled={usageLoading}
               aria-label={t('users.refresh')}
               title={t('users.refresh')}

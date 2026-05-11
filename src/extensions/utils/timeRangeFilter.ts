@@ -31,6 +31,13 @@ const WINDOW_MS: Record<Exclude<UsersTimeRange, 'all'>, number> = {
 // entirely — users see an empty table right after activity.
 const CLOCK_SKEW_MS = 60_000;
 
+export function timeRangeToSinceMs(range: UsersTimeRange, nowMs: number = Date.now()): number | undefined {
+  if (range === 'all') return undefined;
+  const windowMs = WINDOW_MS[range];
+  if (!Number.isFinite(windowMs) || windowMs <= 0) return undefined;
+  return nowMs - windowMs;
+}
+
 export function isUsersTimeRange(value: unknown): value is UsersTimeRange {
   return (
     value === '1h' ||

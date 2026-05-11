@@ -5,16 +5,16 @@ import { useUsageData } from '../hooks/useUsageData';
 import { useConfigStore, useNotificationStore } from '@/stores';
 import { Select } from '@/components/ui/Select';
 import { IconRefreshCw } from '@/components/ui/icons';
-import { collectUsageDetails, type ModelPrice } from '../utils/usageCompat';
+import type { ModelPrice } from '../utils/usageCompat';
 import { resolveDefaultModelPrice } from '@/data/defaultModelPrices';
 import { useKeyAliases } from '../hooks/useKeyAliases';
 import { makeCostFn, pivotByKey, type PerKeyStats } from '../utils/keyPivot';
 import { buildKeyList } from '../utils/keyIndex';
 import {
-  filterUsageByUsersTimeRange,
   isUsersTimeRange,
   USERS_TIME_RANGE_OPTIONS,
-  type UsersTimeRange
+  type UsersTimeRange,
+  timeRangeToSinceMs
 } from '../utils/timeRangeFilter';
 import { formatCost, formatNumber } from '../utils/keyDisplay';
 import { AliasEditor } from '../components/AliasEditor';
@@ -73,10 +73,10 @@ export function UsersPage() {
   const { showNotification } = useNotificationStore();
   const config = useConfigStore((s) => s.config);
   const {
-    usage,
+    summary,
     loading: usageLoading,
     error: usageError,
-    loadUsage,
+    loadSummary,
     modelPrices
   } = useUsageData();
   const { aliases, loading: aliasesLoading, error: aliasesError, saveAlias } = useKeyAliases();
@@ -84,6 +84,10 @@ export function UsersPage() {
   const [filter, setFilter] = useState('');
 
   const [timeRange, setTimeRange] = useState<UsersTimeRange>(loadTimeRange);
+
+  useEffect(() => {
+    void loadSummary(timeRangeToSinceMs(timeRange));
+  }, [loadSummary, timeRange]);
 
   // On first visit (no localStorage entry) we seed with top-N by requests.
   // `selectionStored` tracks whether the current selection is user-authored
@@ -126,28 +130,32 @@ export function UsersPage() {
 
   const knownKeys = useMemo(() => config?.apiKeys || [], [config?.apiKeys]);
 
-  const filteredUsage = useMemo(
-    () => filterUsageByUsersTimeRange(usage, timeRange),
-    [usage, timeRange]
-  );
-
-  // User-configured prices take precedence; fall back to bundled defaults so
-  // models without a manual override still produce a cost instead of $0.
   const effectiveModelPrices = useMemo(() => {
     const merged: Record<string, ModelPrice> = { ...modelPrices };
-    for (const d of collectUsageDetails(filteredUsage)) {
-      const name = d.__modelName;
-      if (!name || merged[name]) continue;
-      const def = resolveDefaultModelPrice(name);
-      if (def) merged[name] = def;
+    const root = summary as { apis?: unknown } | null | undefined;
+    const apis =
+      root && typeof root === 'object' && root.apis && typeof root.apis === 'object'
+        ? (root.apis as Record<string, unknown>)
+        : null;
+    if (apis) {
+      for (const apiEntry of Object.values(apis)) {
+        if (!apiEntry || typeof apiEntry !== 'object') continue;
+        const models = (apiEntry as { models?: unknown }).models;
+        if (!models || typeof models !== 'object') continue;
+        for (const name of Object.keys(models as Record<string, unknown>)) {
+          if (!name || merged[name]) continue;
+          const def = resolveDefaultModelPrice(name);
+          if (def) merged[name] = def;
+        }
+      }
     }
     return merged;
-  }, [modelPrices, filteredUsage]);
+  }, [modelPrices, summary]);
 
   const costFn = useMemo(() => makeCostFn(effectiveModelPrices), [effectiveModelPrices]);
 
   const rows = useMemo<PerKeyStats[]>(() => {
-    const pivoted = pivotByKey(filteredUsage, knownKeys, aliases, costFn);
+    const pivoted = pivotByKey(summary, knownKeys, aliases, costFn);
     // Include "known but no usage" keys so user can still set alias on a fresh key.
     const seen = new Set(pivoted.map((r) => r.apiKey));
     for (const k of knownKeys) {
@@ -175,12 +183,12 @@ export function UsersPage() {
       return b.totalRequests - a.totalRequests;
     });
     return pivoted;
-  }, [filteredUsage, knownKeys, aliases, costFn]);
+  }, [summary, knownKeys, aliases, costFn]);
 
   // Aggregate model counts directly from usage data (not from `rows`) so the
   // picker's list doesn't rebuild on every alias keystroke.
   const availableModels = useMemo(() => {
-    const root = filteredUsage as { apis?: unknown } | null | undefined;
+    const root = summary as { apis?: unknown } | null | undefined;
     const apis =
       root && typeof root === 'object' && root.apis && typeof root.apis === 'object'
         ? (root.apis as Record<string, unknown>)
@@ -203,7 +211,7 @@ export function UsersPage() {
     return Array.from(map, ([name, requests]) => ({ name, requests })).sort(
       (a, b) => b.requests - a.requests
     );
-  }, [filteredUsage]);
+  }, [summary]);
 
   // On first visit (localStorage empty), show top-N recomputed from the
   // current time range's data instead of an empty table. Once the user picks
@@ -263,11 +271,11 @@ export function UsersPage() {
   // Stable index lookup: route params carry the position in this canonical
   // list so API keys never appear in the URL / browser history / referer.
   const keyIndexMap = useMemo(() => {
-    const list = buildKeyList(knownKeys, usage);
+    const list = buildKeyList(knownKeys, summary);
     const map = new Map<string, number>();
     list.forEach((k, i) => map.set(k, i));
     return map;
-  }, [knownKeys, usage]);
+  }, [knownKeys, summary]);
 
   const renderRow = (r: PerKeyStats) => {
     const perModelMap = new Map<string, number>(
@@ -339,7 +347,7 @@ export function UsersPage() {
           <button
             type="button"
             className={styles.refreshBtn}
-            onClick={() => void loadUsage()}
+            onClick={() => void loadSummary(timeRangeToSinceMs(timeRange))}
             disabled={usageLoading}
             aria-label={t('users.refresh')}
             title={t('users.refresh')}

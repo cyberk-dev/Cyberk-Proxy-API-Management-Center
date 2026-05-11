@@ -52,6 +52,33 @@ type ExportPayload struct {
 	Usage      *UsageSnapshot `json:"usage"`
 }
 
+type ModelSummary struct {
+	TotalRequests   int64    `json:"total_requests"`
+	SuccessCount    int64    `json:"success_count"`
+	FailureCount    int64    `json:"failure_count"`
+	TotalTokens     int64    `json:"total_tokens"`
+	InputTokens     int64    `json:"input_tokens"`
+	OutputTokens    int64    `json:"output_tokens"`
+	CachedTokens    int64    `json:"cached_tokens"`
+	ReasoningTokens int64    `json:"reasoning_tokens"`
+	LastActive      string   `json:"last_active,omitempty"`
+	Details         []Detail `json:"details"`
+}
+
+type APISummary struct {
+	TotalRequests int64                    `json:"total_requests"`
+	TotalTokens   int64                    `json:"total_tokens"`
+	Models        map[string]*ModelSummary `json:"models"`
+}
+
+type UsageSummarySnapshot struct {
+	TotalRequests int64                   `json:"total_requests"`
+	SuccessCount  int64                   `json:"success_count"`
+	FailureCount  int64                   `json:"failure_count"`
+	TotalTokens   int64                   `json:"total_tokens"`
+	APIs          map[string]*APISummary  `json:"apis"`
+}
+
 type Store struct {
 	mu   sync.RWMutex
 	data UsageSnapshot
@@ -144,6 +171,114 @@ func (s *Store) Snapshot() *UsageSnapshot {
 		cp.APIs[k] = v
 	}
 	return &cp
+}
+
+// SummarySnapshot returns aggregated usage without details arrays.
+// If since is non-zero, only details with timestamp >= since are counted.
+func (s *Store) SummarySnapshot(since time.Time) *UsageSummarySnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	filterTime := !since.IsZero()
+
+	snap := &UsageSummarySnapshot{
+		APIs: make(map[string]*APISummary, len(s.data.APIs)),
+	}
+	for apiKey, apiData := range s.data.APIs {
+		as := &APISummary{
+			Models: make(map[string]*ModelSummary, len(apiData.Models)),
+		}
+		for modelName, modelData := range apiData.Models {
+			ms := &ModelSummary{Details: []Detail{}}
+			var lastActiveTs string
+			for _, d := range modelData.Details {
+				if filterTime {
+					ts, err := time.Parse(time.RFC3339Nano, d.Timestamp)
+					if err != nil || ts.Before(since) {
+						continue
+					}
+				}
+				ms.TotalRequests++
+				if d.Failed {
+					ms.FailureCount++
+				} else {
+					ms.SuccessCount++
+				}
+				ms.InputTokens += d.Tokens.InputTokens
+				ms.OutputTokens += d.Tokens.OutputTokens
+				ms.CachedTokens += d.Tokens.CachedTokens
+				ms.ReasoningTokens += d.Tokens.ReasoningTokens
+				ms.TotalTokens += d.Tokens.TotalTokens
+				if d.Timestamp > lastActiveTs {
+					lastActiveTs = d.Timestamp
+				}
+			}
+			if ms.TotalRequests == 0 {
+				continue
+			}
+			ms.LastActive = lastActiveTs
+			as.Models[modelName] = ms
+			as.TotalRequests += ms.TotalRequests
+			as.TotalTokens += ms.TotalTokens
+		}
+		if as.TotalRequests == 0 {
+			continue
+		}
+		snap.APIs[apiKey] = as
+		snap.TotalRequests += as.TotalRequests
+		snap.TotalTokens += as.TotalTokens
+		for _, ms := range as.Models {
+			snap.SuccessCount += ms.SuccessCount
+			snap.FailureCount += ms.FailureCount
+		}
+	}
+	return snap
+}
+
+func (s *Store) KeySnapshot(apiKey string) *UsageSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	apiData, ok := s.data.APIs[apiKey]
+	if !ok {
+		return nil
+	}
+
+	cpModels := make(map[string]*ModelData, len(apiData.Models))
+	for modelName, modelData := range apiData.Models {
+		details := make([]Detail, len(modelData.Details))
+		copy(details, modelData.Details)
+		cpModels[modelName] = &ModelData{
+			TotalRequests: modelData.TotalRequests,
+			TotalTokens:   modelData.TotalTokens,
+			Details:       details,
+		}
+	}
+
+	cpAPI := &APIData{
+		TotalRequests: apiData.TotalRequests,
+		TotalTokens:   apiData.TotalTokens,
+		Models:        cpModels,
+	}
+
+	var successCount, failureCount int64
+	for _, md := range cpModels {
+		for _, d := range md.Details {
+			if d.Failed {
+				failureCount++
+			} else {
+				successCount++
+			}
+		}
+	}
+
+	return &UsageSnapshot{
+		TotalRequests: apiData.TotalRequests,
+		SuccessCount:  successCount,
+		FailureCount:  failureCount,
+		TotalTokens:   apiData.TotalTokens,
+		APIs:          map[string]*APIData{apiKey: cpAPI},
+	}
 }
 
 func (s *Store) Export() *ExportPayload {

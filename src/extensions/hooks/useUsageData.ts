@@ -18,12 +18,16 @@ export interface UsagePayload {
 
 export interface UseUsageDataReturn {
   usage: UsagePayload | null;
+  summary: UsagePayload | null;
+  keyUsage: UsagePayload | null;
   loading: boolean;
   error: string;
   lastRefreshedAt: Date | null;
   modelPrices: Record<string, ModelPrice>;
   setModelPrices: (prices: Record<string, ModelPrice>) => void;
   loadUsage: () => Promise<void>;
+  loadSummary: (sinceMs?: number) => Promise<void>;
+  loadKeyUsage: (apiKey: string) => Promise<void>;
   handleExport: () => Promise<void>;
   handleImport: () => void;
   handleImportChange: (event: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
@@ -70,6 +74,8 @@ export function useUsageData(): UseUsageDataReturn {
   const { showNotification } = useNotificationStore();
 
   const [usage, setUsage] = useState<UsagePayload | null>(null);
+  const [summary, setSummary] = useState<UsagePayload | null>(null);
+  const [keyUsage, setKeyUsage] = useState<UsagePayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
@@ -93,10 +99,43 @@ export function useUsageData(): UseUsageDataReturn {
     }
   }, []);
 
+  const loadSummary = useCallback(async (sinceMs?: number) => {
+    setLoading(true);
+    setError('');
+    try {
+      const url = sinceMs ? `/usage/summary?since=${sinceMs}` : '/usage/summary';
+      const data = await apiClient.get<Record<string, unknown>>(url, { timeout: USAGE_TIMEOUT_MS });
+      setSummary(data as UsagePayload);
+      setLastRefreshedAt(new Date());
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadKeyUsage = useCallback(async (apiKey: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await apiClient.get<Record<string, unknown>>(
+        `/usage/keys/${encodeURIComponent(apiKey)}`,
+        { timeout: USAGE_TIMEOUT_MS }
+      );
+      setKeyUsage(data as UsagePayload);
+      setLastRefreshedAt(new Date());
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    void loadUsage();
     setModelPricesState(loadModelPrices());
-  }, [loadUsage]);
+  }, []);
 
   const handleExport = async () => {
     setExporting(true);
@@ -152,8 +191,9 @@ export function useUsageData(): UseUsageDataReturn {
   }, []);
 
   return {
-    usage, loading, error, lastRefreshedAt, modelPrices, setModelPrices,
-    loadUsage, handleExport, handleImport, handleImportChange, importInputRef,
+    usage, summary, keyUsage, loading, error, lastRefreshedAt, modelPrices, setModelPrices,
+    loadUsage, loadSummary, loadKeyUsage,
+    handleExport, handleImport, handleImportChange, importInputRef,
     exporting, importing,
   };
 }

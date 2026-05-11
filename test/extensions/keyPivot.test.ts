@@ -314,3 +314,154 @@ describe('successRate', () => {
     closeTo(successRate(alice), 75, 1e-5);
   });
 });
+
+// Summary data: model-level aggregates, empty details — mirrors /usage/summary response
+const SUMMARY_USAGE = {
+  total_requests: 1731,
+  success_count: 1700,
+  failure_count: 31,
+  total_tokens: 241127375,
+  apis: {
+    anderson: {
+      total_requests: 1631,
+      total_tokens: 241059645,
+      models: {
+        'gpt-5.4': {
+          total_requests: 1531,
+          success_count: 1500,
+          failure_count: 31,
+          total_tokens: 240000000,
+          input_tokens: 180000000,
+          output_tokens: 25000000,
+          cached_tokens: 35000000,
+          reasoning_tokens: 1000000,
+          last_active: '2026-05-10T10:00:00Z',
+          details: []
+        },
+        'qwen3.5-plus': {
+          total_requests: 100,
+          success_count: 100,
+          failure_count: 0,
+          total_tokens: 1059645,
+          input_tokens: 800000,
+          output_tokens: 259645,
+          cached_tokens: 0,
+          reasoning_tokens: 0,
+          last_active: '2026-05-09T08:00:00Z',
+          details: []
+        }
+      }
+    },
+    huycyberk: {
+      total_requests: 100,
+      total_tokens: 67730,
+      models: {
+        'claude-sonnet-4-6': {
+          total_requests: 100,
+          success_count: 100,
+          failure_count: 0,
+          total_tokens: 67730,
+          input_tokens: 50000,
+          output_tokens: 17730,
+          cached_tokens: 30000,
+          reasoning_tokens: 0,
+          last_active: '2026-05-10T14:00:00Z',
+          details: []
+        }
+      }
+    }
+  }
+};
+
+describe('pivotByKey — summary mode (empty details, aggregate fields)', () => {
+  it('reads totals from model-level aggregates when details is empty', () => {
+    const result = pivotByKey(SUMMARY_USAGE, ['anderson', 'huycyberk'], {}, noCost);
+    assert.equal(result.length, 2);
+    const anderson = result.find((r) => r.apiKey === 'anderson')!;
+    assert.equal(anderson.totalRequests, 1631);
+    assert.equal(anderson.successCount, 1600);
+    assert.equal(anderson.failureCount, 31);
+    assert.equal(anderson.perModel.length, 2);
+    const gpt = anderson.perModel.find((m) => m.model === 'gpt-5.4')!;
+    assert.equal(gpt.requests, 1531);
+    assert.equal(gpt.successCount, 1500);
+    assert.equal(gpt.failureCount, 31);
+  });
+
+  it('normalizes gpt-* input by subtracting cached in summary mode', () => {
+    const result = pivotByKey(SUMMARY_USAGE, ['anderson'], {}, noCost);
+    const anderson = result.find((r) => r.apiKey === 'anderson')!;
+    const gpt = anderson.perModel.find((m) => m.model === 'gpt-5.4')!;
+    // gpt-*: input_tokens includes cached → 180000000 - 35000000 = 145000000
+    assert.equal(gpt.inputTokens, 145000000);
+    assert.equal(gpt.cachedTokens, 35000000);
+  });
+
+  it('does not subtract cached from Claude input in summary mode', () => {
+    const result = pivotByKey(SUMMARY_USAGE, ['huycyberk'], {}, noCost);
+    const huy = result.find((r) => r.apiKey === 'huycyberk')!;
+    const claude = huy.perModel.find((m) => m.model === 'claude-sonnet-4-6')!;
+    // Claude: input_tokens already excludes cached → pass through
+    assert.equal(claude.inputTokens, 50000);
+    assert.equal(claude.cachedTokens, 30000);
+  });
+
+  it('computes cost from summary aggregates', () => {
+    const result = pivotByKey(SUMMARY_USAGE, ['huycyberk'], {}, costFn);
+    const huy = result.find((r) => r.apiKey === 'huycyberk')!;
+    // No price for claude-sonnet-4-6 in PRICES → cost should be 0
+    assert.equal(huy.totalCost, 0);
+  });
+
+  it('computes cost with matching price in summary mode', () => {
+    const summaryPrices: Record<string, ModelPrice> = {
+      'claude-sonnet-4-6': { prompt: 3, completion: 10, cache: 1 }
+    };
+    const fn = makeCostFn(summaryPrices);
+    const result = pivotByKey(SUMMARY_USAGE, ['huycyberk'], {}, fn);
+    const huy = result.find((r) => r.apiKey === 'huycyberk')!;
+    // prompt=50000*3/1M + cache=30000*1/1M + completion=17730*10/1M
+    closeTo(huy.totalCost, 0.00015 + 0.00003 + 0.0001773);
+  });
+
+  it('tracks lastActiveMs from model-level last_active', () => {
+    const result = pivotByKey(SUMMARY_USAGE, ['anderson'], {}, noCost);
+    const anderson = result.find((r) => r.apiKey === 'anderson')!;
+    assert.equal(anderson.lastActiveMs, Date.parse('2026-05-10T10:00:00Z'));
+    const gpt = anderson.perModel.find((m) => m.model === 'gpt-5.4')!;
+    assert.equal(gpt.lastActiveMs, Date.parse('2026-05-10T10:00:00Z'));
+  });
+
+  it('marks orphans correctly in summary mode', () => {
+    const result = pivotByKey(SUMMARY_USAGE, ['anderson'], {}, noCost);
+    assert.equal(result.find((r) => r.apiKey === 'anderson')!.orphan, false);
+    assert.equal(result.find((r) => r.apiKey === 'huycyberk')!.orphan, true);
+  });
+
+  it('attaches alias in summary mode', () => {
+    const result = pivotByKey(
+      SUMMARY_USAGE,
+      ['anderson', 'huycyberk'],
+      { anderson: 'Anderson', huycyberk: 'Kane' },
+      noCost
+    );
+    assert.equal(result.find((r) => r.apiKey === 'anderson')!.alias, 'Anderson');
+    assert.equal(result.find((r) => r.apiKey === 'huycyberk')!.alias, 'Kane');
+  });
+
+  it('skips model with total_requests=0 in summary mode', () => {
+    const usage = {
+      apis: {
+        'sk-x': {
+          models: {
+            m1: { total_requests: 5, success_count: 5, failure_count: 0, total_tokens: 100, input_tokens: 60, output_tokens: 40, cached_tokens: 0, details: [] },
+            m2: { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, details: [] }
+          }
+        }
+      }
+    };
+    const result = pivotByKey(usage, ['sk-x'], {}, noCost);
+    assert.equal(result[0].perModel.length, 1);
+    assert.equal(result[0].perModel[0].model, 'm1');
+  });
+});

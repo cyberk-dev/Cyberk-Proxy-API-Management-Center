@@ -185,54 +185,66 @@ export function pivotByKey(
       const details = Array.isArray(detailsRaw) ? detailsRaw : [];
       const m = newModelStats(modelName);
 
-      for (const raw of details) {
-        if (!isRecord(raw)) continue;
-        const tokensRaw = (isRecord(raw.tokens) ? raw.tokens : {}) as TokenBundle;
-        const rawInput = safeNumber(tokensRaw.input_tokens);
-        const outT = safeNumber(tokensRaw.output_tokens);
-        const cachedT = Math.max(
-          safeNumber(tokensRaw.cached_tokens),
-          safeNumber(tokensRaw.cache_tokens)
-        );
-        // Normalize `input` so it always means "new prompt tokens" (i.e. the
-        // portion NOT served from cache). Without this, gpt-* rows pump the
-        // total by the cached slice and the Input column ends up visually
-        // overlapping with the Cached column (see upstream Codex semantics).
-        const inputT = inputIncludesCached(modelName)
-          ? Math.max(rawInput - cachedT, 0)
-          : rawInput;
-        // Preserve upstream `total_tokens` semantics (for Codex this already
-        // includes the cached slice, for Claude it doesn't) so the "Total
-        // tokens" stat card keeps matching the raw proxy export. The new-input
-        // normalization only affects the Input column.
-        const totalT = safeNumber(tokensRaw.total_tokens) || rawInput + outT;
-        const failed = raw.failed === true;
-        const tsMs = parseTsMs(raw.timestamp);
-        const cost = costFn(modelName, tokensRaw);
+      if (details.length === 0 && safeNumber(modelEntry.total_requests) > 0) {
+        const rawInput = safeNumber(modelEntry.input_tokens);
+        const cachedT = safeNumber(modelEntry.cached_tokens);
+        const inputT = inputIncludesCached(modelName) ? Math.max(rawInput - cachedT, 0) : rawInput;
 
-        m.requests += 1;
-        if (failed) m.failureCount += 1;
-        else m.successCount += 1;
-        m.inputTokens += inputT;
-        m.outputTokens += outT;
-        m.cachedTokens += cachedT;
-        m.totalTokens += totalT;
-        m.cost += cost;
-        if (tsMs > m.lastActiveMs) m.lastActiveMs = tsMs;
+        m.requests = safeNumber(modelEntry.total_requests);
+        m.successCount = safeNumber(modelEntry.success_count);
+        m.failureCount = safeNumber(modelEntry.failure_count);
+        m.inputTokens = inputT;
+        m.outputTokens = safeNumber(modelEntry.output_tokens);
+        m.cachedTokens = cachedT;
+        m.totalTokens = safeNumber(modelEntry.total_tokens);
+        m.cost = costFn(modelName, {
+          input_tokens: rawInput,
+          output_tokens: m.outputTokens,
+          cached_tokens: cachedT,
+          total_tokens: m.totalTokens,
+        });
+        m.lastActiveMs = parseTsMs(modelEntry.last_active);
+      } else {
+        for (const raw of details) {
+          if (!isRecord(raw)) continue;
+          const tokensRaw = (isRecord(raw.tokens) ? raw.tokens : {}) as TokenBundle;
+          const rawInput = safeNumber(tokensRaw.input_tokens);
+          const outT = safeNumber(tokensRaw.output_tokens);
+          const cachedT = Math.max(
+            safeNumber(tokensRaw.cached_tokens),
+            safeNumber(tokensRaw.cache_tokens)
+          );
+          const inputT = inputIncludesCached(modelName)
+            ? Math.max(rawInput - cachedT, 0)
+            : rawInput;
+          const totalT = safeNumber(tokensRaw.total_tokens) || rawInput + outT;
+          const failed = raw.failed === true;
+          const tsMs = parseTsMs(raw.timestamp);
+          const cost = costFn(modelName, tokensRaw);
 
-        stats.totalRequests += 1;
-        if (failed) stats.failureCount += 1;
-        else stats.successCount += 1;
-        stats.inputTokens += inputT;
-        stats.outputTokens += outT;
-        stats.cachedTokens += cachedT;
-        stats.totalTokens += totalT;
-        stats.totalCost += cost;
-        if (tsMs > stats.lastActiveMs) stats.lastActiveMs = tsMs;
+          m.requests += 1;
+          if (failed) m.failureCount += 1;
+          else m.successCount += 1;
+          m.inputTokens += inputT;
+          m.outputTokens += outT;
+          m.cachedTokens += cachedT;
+          m.totalTokens += totalT;
+          m.cost += cost;
+          if (tsMs > m.lastActiveMs) m.lastActiveMs = tsMs;
+        }
       }
 
       if (m.requests > 0) {
         stats.perModel.push(m);
+        stats.totalRequests += m.requests;
+        stats.successCount += m.successCount;
+        stats.failureCount += m.failureCount;
+        stats.inputTokens += m.inputTokens;
+        stats.outputTokens += m.outputTokens;
+        stats.cachedTokens += m.cachedTokens;
+        stats.totalTokens += m.totalTokens;
+        stats.totalCost += m.cost;
+        if (m.lastActiveMs > stats.lastActiveMs) stats.lastActiveMs = m.lastActiveMs;
       }
     }
 

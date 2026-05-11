@@ -4,7 +4,9 @@ import (
 	"crypto/subtle"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -16,6 +18,26 @@ func RegisterRoutes(engine *gin.Engine, cfg *config.Config, store *Store) {
 
 	engine.GET("/v0/management/usage", auth, func(c *gin.Context) {
 		c.JSON(http.StatusOK, store.Snapshot())
+	})
+
+	engine.GET("/v0/management/usage/summary", auth, func(c *gin.Context) {
+		var since time.Time
+		if sinceStr := c.Query("since"); sinceStr != "" {
+			if ms, err := strconv.ParseInt(sinceStr, 10, 64); err == nil && ms > 0 {
+				since = time.UnixMilli(ms)
+			}
+		}
+		c.JSON(http.StatusOK, store.SummarySnapshot(since))
+	})
+
+	engine.GET("/v0/management/usage/keys/:key", auth, func(c *gin.Context) {
+		key := c.Param("key")
+		snap := store.KeySnapshot(key)
+		if snap == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "api key not found in usage data"})
+			return
+		}
+		c.JSON(http.StatusOK, snap)
 	})
 
 	engine.GET("/v0/management/usage/export", auth, func(c *gin.Context) {
