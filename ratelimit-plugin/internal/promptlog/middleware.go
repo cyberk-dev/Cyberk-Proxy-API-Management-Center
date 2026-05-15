@@ -73,6 +73,17 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		client := IdentifyClient(c.Request.Header)
 		cwd := extractCWD(extractSystemText(peek.Body, provider))
 
+		// Claude Code subagents (Task tool dispatches: web search, Explore,
+		// Plan, etc.) reuse the parent's UA + session id but ship their own
+		// system prompt without the env block — so cwd extraction returns "".
+		// They contain no human-typed content, just the dispatcher's framing
+		// like "Perform a web search for the query: ...". Drop them with the
+		// same rationale as the synthetic-CLI prefix list (see extract.go).
+		if client.Name == ClientClaudeCode && cwd == "" {
+			c.Next()
+			return
+		}
+
 		entry := &Entry{
 			Timestamp:     time.Now().UTC(),
 			Provider:      provider,

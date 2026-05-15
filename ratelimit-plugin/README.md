@@ -180,6 +180,14 @@ pastes. Captured content is reduced before write:
   TEXT ONLY. Do NOT call any tools …`). All four are sent by Claude Code as
   `role:"user"` messages but the content is machine-generated. See
   `syntheticCLIPrefixes` in `extract.go` to extend.
+- **Claude Code subagents are dropped at the middleware layer**, even when the
+  prompt prefix is novel. Subagents (Task-tool dispatches: web search, Explore,
+  Plan, custom agent types) reuse the parent's `claude-cli/X.Y.Z` UA and
+  session id but ship their own system prompt without the env block — so cwd
+  extraction returns `""`. The middleware drops any entry where
+  `client = claude_code` AND `cwd = ""`, since real parent CLI requests always
+  carry the `Primary working directory:` line. This catches every subagent
+  type generically rather than chasing each new prefix.
 - **Images / documents / audio** with inline base64 are **masked** to
   `{ media_type, bytes, sha256[:16] }`. The hash is stable across re-encodings
   so you can dedupe attachments without storing pixels.

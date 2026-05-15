@@ -134,9 +134,12 @@ func isWrapperOnly(text string) bool {
 //     invokes a /skill.
 //   - "This session is being continued from a previous conversation" — auto
 //     compaction summary regenerated when context overflows.
-//   - "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools" — subagent /
-//     dispatcher prompt sent without the standard system reminder (also why
-//     these entries land under cwd "(unknown)" in the reader).
+//   - "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools" — one subagent
+//     variant. Most subagent dispatches (web search, Explore, Plan, custom
+//     types) are caught generically in middleware.go via the
+//     `claude_code AND cwd=""` heuristic instead of requiring a prefix here.
+//     This entry stays as a fast pre-extraction filter for the few subagent
+//     paths that ship the same dispatcher framing verbatim.
 //
 // All four were observed verbatim in production logs. They are kept as
 // startswith matches (not regex) so the cost is constant per entry; extend

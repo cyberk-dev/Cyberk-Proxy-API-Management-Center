@@ -120,6 +120,73 @@ func TestMiddleware_SkipsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestMiddleware_DropsClaudeCodeSubagent(t *testing.T) {
+	r, w, dir := newTestRig(t)
+	defer w.Close()
+
+	// Subagent: claude-cli UA, no system block carrying "Primary working
+	// directory:". Parent CLI always sends one — only Task-dispatched
+	// subagents and other internal flows omit it.
+	body := `{"model":"claude","system":"You are a web search agent.","messages":[{"role":"user","content":"Perform a web search for the query: foo"}]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("User-Agent", "claude-cli/2.1.141 (external, cli)")
+	req.Header.Set("X-Claude-Code-Session-Id", "sub-session-1")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	if entries := readAllEntries(t, dir); len(entries) != 0 {
+		t.Fatalf("expected subagent request to be dropped, got %d entries", len(entries))
+	}
+}
+
+func TestMiddleware_KeepsClaudeCodeParentWithCWD(t *testing.T) {
+	r, w, dir := newTestRig(t)
+	defer w.Close()
+
+	// Parent CLI: same UA but system text carries the env block, so cwd
+	// extraction succeeds and the entry must be kept.
+	body := `{"model":"claude","system":"# Environment\nYou have been invoked in the following environment:\n - Primary working directory: /home/u/proj\n","messages":[{"role":"user","content":"hello"}]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("User-Agent", "claude-cli/2.1.141 (external, cli)")
+	req.Header.Set("X-Claude-Code-Session-Id", "parent-session-1")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected parent CLI request to be kept, got %d entries", len(entries))
+	}
+	if entries[0]["cwd"] != "/home/u/proj" {
+		t.Errorf("cwd=%v", entries[0]["cwd"])
+	}
+}
+
+func TestMiddleware_KeepsNonClaudeCodeWithoutCWD(t *testing.T) {
+	r, w, dir := newTestRig(t)
+	defer w.Close()
+
+	// Non-Claude-Code clients (curl, raw SDK, opencode) often have no cwd
+	// either, but they're not subagents — keep them.
+	body := `{"model":"claude","messages":[{"role":"user","content":"hello"}]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("User-Agent", "curl/8.7.1")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	if entries := readAllEntries(t, dir); len(entries) != 1 {
+		t.Fatalf("expected curl request to be kept, got %d entries", len(entries))
+	}
+}
+
 func readAllEntries(t *testing.T, dir string) []map[string]any {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(dir, "prompts-*.jsonl"))
