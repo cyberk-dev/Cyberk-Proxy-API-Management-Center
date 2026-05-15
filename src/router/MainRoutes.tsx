@@ -18,6 +18,7 @@ import { OAuthPage } from '@/pages/OAuthPage';
 import { QuotaPage } from '@/pages/QuotaPage';
 import { ConfigPage } from '@/pages/ConfigPage';
 import { LogsPage } from '@/pages/LogsPage';
+import { PromptsPage } from '@/pages/PromptsPage';
 import { SystemPage } from '@/pages/SystemPage';
 // --- extensions: do not remove ---
 import { extensionRoutes } from '@/extensions';
@@ -76,6 +77,7 @@ const mainRoutes = [
   { path: '/quota', element: <QuotaPage /> },
   { path: '/config', element: <ConfigPage /> },
   { path: '/logs', element: <LogsPage /> },
+  { path: '/prompts', element: <PromptsPage /> },
   { path: '/system', element: <SystemPage /> },
   // --- extensions: do not remove ---
   ...extensionRoutes,

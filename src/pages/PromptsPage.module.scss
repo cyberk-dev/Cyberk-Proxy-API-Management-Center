@@ -1,0 +1,410 @@
+@use '../styles/mixins' as *;
+
+.container {
+  width: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.pageTitle {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 $spacing-md 0;
+}
+
+.pageHeader {
+  margin-bottom: $spacing-md;
+}
+
+.description {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.errorBox {
+  padding: $spacing-md;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  color: var(--text-primary);
+  margin-bottom: $spacing-md;
+  font-size: 13px;
+}
+
+.layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: $spacing-md;
+  min-height: 0;
+
+  &.withDetail {
+    grid-template-columns: 300px 1fr 380px;
+  }
+
+  @include mobile {
+    grid-template-columns: 1fr;
+    &.withDetail {
+      grid-template-columns: 1fr;
+    }
+  }
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.columnHeader {
+  padding: $spacing-sm $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  background: var(--surface-secondary, transparent);
+}
+
+.columnBody {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.pasteRow {
+  padding: $spacing-sm $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.pasteInput {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+}
+
+.pasteHint {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.userList {
+  display: flex;
+  flex-direction: column;
+}
+
+.userRow {
+  @include button-reset;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: $spacing-sm $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+
+  &:hover {
+    background: var(--surface-hover, rgba(127, 127, 127, 0.06));
+  }
+
+  &.selected {
+    background: var(--surface-selected, rgba(99, 102, 241, 0.12));
+    box-shadow: inset 3px 0 0 var(--accent, #6366f1);
+  }
+}
+
+.userKeyHint {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+}
+
+.userMeta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-sm;
+}
+
+.userMetaItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  background: var(--surface-secondary, rgba(127, 127, 127, 0.12));
+  color: var(--text-secondary);
+}
+
+.badgeWarn {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--text-primary);
+}
+
+.tree {
+  display: flex;
+  flex-direction: column;
+}
+
+.cwdGroup {
+  border-bottom: 1px solid var(--border-color);
+  &:last-child { border-bottom: none; }
+}
+
+.cwdHeader {
+  @include button-reset;
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  width: 100%;
+  padding: $spacing-sm $spacing-md;
+  text-align: left;
+  cursor: pointer;
+  background: var(--surface-secondary, transparent);
+  border-bottom: 1px solid var(--border-color);
+  transition: background 0.12s ease;
+
+  &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.06)); }
+}
+
+.cwdPath {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+  flex: 1;
+}
+
+.chevron {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  transition: transform 0.18s ease;
+  transform: rotate(-90deg);
+}
+
+.chevronOpen { transform: rotate(0deg); }
+
+.sessionList {
+  display: flex;
+  flex-direction: column;
+}
+
+.sessionCard {
+  padding: $spacing-sm $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+  &:last-child { border-bottom: none; }
+}
+
+.sessionHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-sm;
+  margin-bottom: $spacing-xs;
+}
+
+.sessionId {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionTime {
+  font-size: 11px;
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+.messageList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.messageRow {
+  @include button-reset;
+  display: grid;
+  grid-template-columns: 60px 90px 1fr 36px;
+  gap: $spacing-sm;
+  padding: 4px $spacing-sm;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 6px;
+  align-items: center;
+  text-align: left;
+  transition: background 0.1s ease;
+
+  &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.08)); }
+  &.selectedMsg {
+    background: var(--surface-selected, rgba(99, 102, 241, 0.14));
+    box-shadow: inset 3px 0 0 var(--accent, #6366f1);
+  }
+}
+
+.msgTime {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.msgModel {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msgText {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msgStatus {
+  font-size: 10px;
+  font-weight: 600;
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: var(--text-secondary);
+
+  &.statusOk { color: var(--success, #22c55e); }
+  &.statusErr { color: var(--danger, #ef4444); }
+}
+
+.truncBanner {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: $spacing-xs $spacing-sm;
+  font-style: italic;
+}
+
+.detailHeader {
+  padding: $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+}
+
+.detailTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.detailBody {
+  padding: $spacing-md;
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.detailMeta {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 4px $spacing-sm;
+  font-size: 12px;
+}
+
+.detailMetaKey {
+  color: var(--text-secondary);
+}
+
+.detailMetaVal {
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  word-break: break-all;
+}
+
+.detailPrompt {
+  background: var(--surface-secondary, rgba(127, 127, 127, 0.06));
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: $spacing-md;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.detailBlocks {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+}
+
+.detailBlock {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  background: var(--surface-secondary, rgba(127, 127, 127, 0.06));
+  padding: $spacing-xs $spacing-sm;
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: $spacing-2xl;
+  color: var(--text-secondary);
+  font-size: 13px;
+  gap: $spacing-sm;
+  text-align: center;
+  min-height: 240px;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: $spacing-2xl;
+}

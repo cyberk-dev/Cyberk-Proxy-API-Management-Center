@@ -183,6 +183,7 @@ func main() {
 			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, c *config.Config) {
 				usagepush.Register(engine, c)
 				usagestore.RegisterRoutes(engine, c, ustore)
+				promptlog.RegisterReadHandlers(engine, c, plogCfg)
 			}),
 		)
 
