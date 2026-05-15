@@ -32,7 +32,28 @@ export interface PromptMessage {
   provider?: string;
   status: number;
   prompt: string;
+  /**
+   * Hash of a registered prompt template (see /v0/management/prompts/templates).
+   * When set, `prompt` holds only the SUFFIX after the template body — the
+   * full prompt is `template.text + prompt`.
+   */
+  prompt_template?: string;
   blocks?: PromptBlock[];
+}
+
+export interface PromptTemplate {
+  hash: string;
+  len: number;
+  source?: string;
+  label?: string;
+  first_seen: string;
+  last_seen: string;
+  occurrences: number;
+  text: string;
+}
+
+export interface PromptTemplatesResponse {
+  templates: PromptTemplate[];
 }
 
 export interface PromptSession {

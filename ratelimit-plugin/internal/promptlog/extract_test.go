@@ -2,6 +2,7 @@ package promptlog
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -235,6 +236,74 @@ func TestExtract_LastUserMessageWins(t *testing.T) {
 	}
 }
 
+func TestExtract_OpenAIChatSkipsToolRoundtrip(t *testing.T) {
+	// Agent-loop continuation: user typed "do X" earlier, model returned
+	// tool_calls, runtime appended the tool result. The last user-role
+	// message is still "do X" — without the last-must-be-user guard we would
+	// re-log "do X" on every iteration. Expect nil so the writer skips this
+	// request entirely.
+	body := []byte(`{
+		"messages": [
+			{"role": "user", "content": "do X"},
+			{"role": "assistant", "content": null, "tool_calls": [
+				{"id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+			]},
+			{"role": "tool", "tool_call_id": "call_1", "content": "result"}
+		]
+	}`)
+	if blocks := extractBlocks(body, ProviderOpenAIChat, 1000); blocks != nil {
+		t.Fatalf("expected nil for tool-roundtrip continuation, got %+v", blocks)
+	}
+}
+
+func TestExtract_OpenAIChatSkipsAssistantTrailing(t *testing.T) {
+	// Defensive: a request whose last message is role:"assistant" cannot be
+	// a fresh user prompt and should be skipped.
+	body := []byte(`{
+		"messages": [
+			{"role": "user", "content": "ping"},
+			{"role": "assistant", "content": "pong"}
+		]
+	}`)
+	if blocks := extractBlocks(body, ProviderOpenAIChat, 1000); blocks != nil {
+		t.Fatalf("expected nil when last message is assistant, got %+v", blocks)
+	}
+}
+
+func TestExtract_OpenAIResponsesSkipsFunctionOutput(t *testing.T) {
+	// Responses agent loop: the runtime appends a function_call_output item
+	// (no role) after the model's function_call. Last item is not a user
+	// message → skip.
+	body := []byte(`{
+		"input": [
+			{"role": "user", "content": [{"type": "input_text", "text": "compute"}]},
+			{"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "c1", "output": "42"}
+		]
+	}`)
+	if blocks := extractBlocks(body, ProviderOpenAIResponses, 1000); blocks != nil {
+		t.Fatalf("expected nil for function_call_output trailing, got %+v", blocks)
+	}
+}
+
+func TestExtract_OpenAIResponsesLogsNewUserMessage(t *testing.T) {
+	// After the loop completes and the user types a follow-up, the new user
+	// message becomes the trailing item — extract should fire normally.
+	body := []byte(`{
+		"input": [
+			{"role": "user", "content": [{"type": "input_text", "text": "compute"}]},
+			{"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "c1", "output": "42"},
+			{"role": "assistant", "content": [{"type": "output_text", "text": "got 42"}]},
+			{"role": "user", "content": [{"type": "input_text", "text": "now double it"}]}
+		]
+	}`)
+	blocks := extractBlocks(body, ProviderOpenAIResponses, 1000)
+	if len(blocks) != 1 || blocks[0].Text != "now double it" {
+		t.Fatalf("expected the trailing user message, got %+v", blocks)
+	}
+}
+
 func TestExtract_NoUserMessage(t *testing.T) {
 	body := []byte(`{
 		"messages": [
@@ -286,6 +355,46 @@ func TestExtract_AllWrappersBecomesNil(t *testing.T) {
 	if blocks := extractBlocks(body, ProviderAnthropic, 1000); blocks != nil {
 		t.Fatalf("expected nil, got %+v", blocks)
 	}
+}
+
+func TestExtract_DropsSyntheticCLIPrompts(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{"suggestion-mode", "[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]\n\nFIRST: Look at the user's recent messages…"},
+		{"skill-body", "Base directory for this skill: /Users/x/.claude/plugins/foo\n\n# Systematic Debugging\n\nSteps:"},
+		{"compaction", "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion…"},
+		{"subagent", "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\n- Do NOT use Read, Bash, Grep…"},
+		{"opencode-summary", "Create a new anchored summary from the conversation history above.\n\nOutput exactly the Markdown structure shown inside <template>…"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(`{"messages":[{"role":"user","content":` + jsonString(tc.text) + `}]}`)
+			if blocks := extractBlocks(payload, ProviderAnthropic, 5000); blocks != nil {
+				t.Fatalf("expected nil for synthetic CLI prompt, got %+v", blocks)
+			}
+		})
+	}
+}
+
+func TestExtract_KeepsProseMentioningSyntheticPrefix(t *testing.T) {
+	// A real user message that merely talks about the prefix (not starting
+	// with it) must be preserved. Detection is startswith on a trimmed
+	// first text block, so leading prose anchors the message as human.
+	body := []byte(`{"messages":[{"role":"user","content":"why does my log show '[SUGGESTION MODE:' entries?"}]}`)
+	blocks := extractBlocks(body, ProviderAnthropic, 1000)
+	if len(blocks) != 1 || blocks[0].Type != "text" {
+		t.Fatalf("expected 1 text block, got %+v", blocks)
+	}
+}
+
+func jsonString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 func TestExtract_KeepsTextThatMentionsTag(t *testing.T) {

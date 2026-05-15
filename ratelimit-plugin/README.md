@@ -148,9 +148,15 @@ Output: `<dir>/prompts-YYYY-MM-DD.jsonl` (UTC date). One JSON object per line:
 
 ### What gets captured
 
-- **Last user message only.** Tool-loop rounds where the final message is a
-  `tool_result` (Anthropic) or `function_response` (Gemini) are skipped — there
-  is no user prompt to log.
+- **Last user message only.** Tool-loop rounds are skipped so a single
+  user-typed prompt is logged exactly once even when the model fans out into
+  many tool calls. Detection differs by schema:
+    - Anthropic / Gemini: the last message is still `role: "user"` but its
+      content is purely `tool_result` / `function_response` blocks → filtered
+      out → empty → dropped.
+    - OpenAI Chat / Responses: the last message is `role: "tool"` (Chat) or a
+      typed `function_call_output` item (Responses) → not user-role → skipped
+      before extraction.
 - **Both successful and rejected requests.** The middleware runs *before*
   policy + rate-limit, so blocked attempts still appear with their rejection
   status (400 / 429 / 403). Analyzing failed attempts is one of the main
@@ -167,6 +173,13 @@ pastes. Captured content is reduced before write:
 
 - `<system-reminder>`, `<local-command-*>`, `<command-*>` wrapper blocks are
   **dropped** — they are Claude Code CLI artifacts, not user-authored text.
+- **Synthetic CLI prompts** are **dropped entirely**: ghost-text autocomplete
+  (`[SUGGESTION MODE: …]`), skill body injection (`Base directory for this
+  skill: …`), compaction summary (`This session is being continued from a
+  previous conversation …`), and subagent dispatch (`CRITICAL: Respond with
+  TEXT ONLY. Do NOT call any tools …`). All four are sent by Claude Code as
+  `role:"user"` messages but the content is machine-generated. See
+  `syntheticCLIPrefixes` in `extract.go` to extend.
 - **Images / documents / audio** with inline base64 are **masked** to
   `{ media_type, bytes, sha256[:16] }`. The hash is stable across re-encodings
   so you can dedupe attachments without storing pixels.
@@ -283,6 +296,29 @@ the cap include `truncated: true`.
 }
 ```
 
+### Templates (dynamic prefix dedup)
+
+Long prefixes that recur across many prompts — Claude Code's compaction
+summary, opencode's auto-summarize, custom slash-command bodies, skill
+markdown — are detected automatically and stored once in
+`<dir>/templates.jsonl`. Subsequent matching entries are encoded as
+`prompt_template: <hash>` plus the suffix only.
+
+Defaults: a prefix of ≥ 200 runes shared by ≥ 3 distinct prompts within the
+last 5000 entries qualifies; the detector runs every 5 minutes (or sooner if
+window/5 new prompts have arrived). Tune via `prompt_log.templates.*` —
+disable with `enabled: false`.
+
+Two read endpoints expose the catalog:
+
+- `GET /v0/management/prompts/templates` — list every registered template
+  (hash, length, source, occurrences, first/last seen, full text).
+- `GET /v0/management/prompts/templates/:hash` — fetch one by hash.
+
+The detail endpoint accepts `?inline_templates=1` to splice template bodies
+back into each message's `prompt` server-side, useful for `jq` workflows that
+want self-contained data.
+
 ### Quick analysis via `jq`
 
 If you'd rather work straight from the JSONL files:
@@ -306,9 +342,12 @@ curl -s -H "X-Management-Key: $MGMT_KEY" /v0/management/prompts/users \
 
 `/prompts` in the management web UI exposes the same data with a 3-column
 layout: **API keys** (sidebar with paste-field for ad-hoc lookup) →
-**cwd / session tree** (expandable, compact 1-line message rows) →
-**message detail** side-panel (full text, blocks, metadata) when a row is
-clicked. Refresh via the header refresh button reloads both the user list
+**cwd / session tree** (expandable, compact 1-line message rows; templated
+prompts show a `📋 <hash> · Nc` chip) → **message detail** side-panel (full
+text, blocks, metadata, "Show template" expand for templated entries) when a
+row is clicked. A header toggle "Show templates inline" flips the page into
+self-contained mode (server splices template bodies back into prompts).
+Refresh via the header refresh button reloads both the user list
 and the currently selected key's tree.
 
 ## Docker

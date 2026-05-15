@@ -233,13 +233,46 @@ type Session struct {
 // Message is a slim view used in the tree — heavy fields like Blocks are
 // dropped here to keep the response small; the UI fetches full detail (with
 // blocks) lazily via the detail endpoint with a session filter, if needed.
+//
+// PromptTemplate, when set, is the hash of a registered template whose body
+// is the prefix of the original prompt; Prompt then holds only the suffix.
+// The UI reconstructs the full text by fetching /templates/:hash and
+// concatenating, OR the caller can pass `?inline_templates=1` to BuildDetail
+// so the server splices the template back in.
 type Message struct {
-	Timestamp time.Time `json:"ts"`
-	Model     string    `json:"model,omitempty"`
-	Provider  string    `json:"provider,omitempty"`
-	Status    int       `json:"status"`
-	Prompt    string    `json:"prompt"`
-	Blocks    []Block   `json:"blocks,omitempty"`
+	Timestamp      time.Time `json:"ts"`
+	Model          string    `json:"model,omitempty"`
+	Provider       string    `json:"provider,omitempty"`
+	Status         int       `json:"status"`
+	Prompt         string    `json:"prompt"`
+	PromptTemplate string    `json:"prompt_template,omitempty"`
+	Blocks         []Block   `json:"blocks,omitempty"`
+}
+
+// InlineTemplates rewrites every Message in detail by splicing the matching
+// template body back into Prompt and clearing PromptTemplate. Used when the
+// caller wants the response self-contained (e.g. dashboards that don't want
+// to make a second round-trip to /templates/:hash). When templates is nil,
+// no-op.
+func InlineTemplates(detail *Detail, templates *TemplateStore) {
+	if detail == nil || templates == nil {
+		return
+	}
+	for gi := range detail.Groups {
+		for si := range detail.Groups[gi].Sessions {
+			msgs := detail.Groups[gi].Sessions[si].Messages
+			for mi := range msgs {
+				h := msgs[mi].PromptTemplate
+				if h == "" {
+					continue
+				}
+				if t, ok := templates.Get(h); ok {
+					msgs[mi].Prompt = t.Text + msgs[mi].Prompt
+					msgs[mi].PromptTemplate = ""
+				}
+			}
+		}
+	}
 }
 
 // BuildDetail scans the JSONL store filtering by keyHash and returns a
@@ -320,11 +353,12 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, pe
 		}
 		// Keep the most recent perSessionLimit messages via a sliding window.
 		s.msgs = append(s.msgs, Message{
-			Timestamp: e.Timestamp,
-			Model:     e.Model,
-			Provider:  e.Provider,
-			Status:    e.Status,
-			Prompt:    e.Prompt,
+			Timestamp:      e.Timestamp,
+			Model:          e.Model,
+			Provider:       e.Provider,
+			Status:         e.Status,
+			Prompt:         e.Prompt,
+			PromptTemplate: e.PromptTemplate,
 		})
 		if len(s.msgs) > perSessionLimit {
 			s.msgs = s.msgs[len(s.msgs)-perSessionLimit:]

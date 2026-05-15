@@ -15,13 +15,16 @@ import (
 
 // RegisterReadHandlers exposes the read-only prompt log under
 // /v0/management/prompts/*. Auth mirrors usagestore's management-key
-// middleware so operators only configure one secret.
-func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *Config) {
+// middleware so operators only configure one secret. templates may be nil
+// (templating disabled) — in that case the templates endpoints return 503.
+func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *Config, templates *TemplateStore) {
 	if plogCfg == nil || !plogCfg.IsEnabled() {
 		// Endpoints are registered anyway so the UI gets a clean 503 instead
 		// of 404 — easier to detect "feature off" vs "wrong URL".
 		engine.GET("/v0/management/prompts/users", disabledHandler)
 		engine.GET("/v0/management/prompts/users/:key", disabledHandler)
+		engine.GET("/v0/management/prompts/templates", disabledHandler)
+		engine.GET("/v0/management/prompts/templates/:hash", disabledHandler)
 		return
 	}
 
@@ -34,6 +37,32 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"users": users})
+	})
+
+	engine.GET("/v0/management/prompts/templates", auth, func(c *gin.Context) {
+		if templates == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "templates feature is disabled"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"templates": templates.List()})
+	})
+
+	engine.GET("/v0/management/prompts/templates/:hash", auth, func(c *gin.Context) {
+		if templates == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "templates feature is disabled"})
+			return
+		}
+		hash := strings.ToLower(strings.TrimSpace(c.Param("hash")))
+		if hash == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing hash"})
+			return
+		}
+		t, ok := templates.Get(hash)
+		if !ok {
+			c.JSON(http.StatusNotFound, gin.H{"error": "template not found"})
+			return
+		}
+		c.JSON(http.StatusOK, t)
 	})
 
 	engine.GET("/v0/management/prompts/users/:key", auth, func(c *gin.Context) {
@@ -78,6 +107,9 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+		if c.Query("inline_templates") == "1" {
+			InlineTemplates(detail, templates)
 		}
 		c.JSON(http.StatusOK, detail)
 	})

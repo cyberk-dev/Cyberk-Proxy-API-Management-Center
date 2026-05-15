@@ -49,7 +49,12 @@ func extractBlocks(peek []byte, provider string, maxText int) []Block {
 	case ProviderAnthropic:
 		blocks = extractFromMessages(peek, "messages", extractAnthropicBlock, maxText)
 	case ProviderOpenAIChat:
-		blocks = extractFromMessages(peek, "messages", extractOpenAIChatBlock, maxText)
+		// OpenAI Chat tool results have role:"tool" (not "user"), so during an
+		// agent loop the last user-role message is the original prompt — using
+		// "last user-role wins" would re-log it on every loop iteration. Only
+		// extract when the LAST message in the array is role:"user", i.e. the
+		// caller just appended a fresh prompt.
+		blocks = extractIfLastIsUser(peek, "messages", extractOpenAIChatBlock, maxText)
 	case ProviderOpenAIResponses:
 		blocks = extractOpenAIResponses(peek, maxText)
 	case ProviderGemini:
@@ -62,6 +67,12 @@ func extractBlocks(peek []byte, provider string, maxText int) []Block {
 	}
 	filtered := dropWrapperBlocks(blocks)
 	if len(filtered) == 0 {
+		return nil
+	}
+	if isSyntheticCLIPrompt(filtered) {
+		// CLI-internal prompt (suggestion mode, skill body, compaction
+		// summary, subagent dispatch) sent by the client as role:"user" but
+		// never typed by a human — drop the entire entry.
 		return nil
 	}
 	return filtered
@@ -110,6 +121,51 @@ func isWrapperOnly(text string) bool {
 		if strings.HasPrefix(trimmed, open) && strings.HasSuffix(trimmed, closing) {
 			return true
 		}
+	}
+	return false
+}
+
+// syntheticCLIPrefixes are leading markers Claude Code (and similar CLIs)
+// use when sending its own machine-generated content as a user-role message:
+//
+//   - "[SUGGESTION MODE:" — ghost-text autocomplete asking the model to guess
+//     what the human will type next.
+//   - "Base directory for this skill:" — skill body injection when the user
+//     invokes a /skill.
+//   - "This session is being continued from a previous conversation" — auto
+//     compaction summary regenerated when context overflows.
+//   - "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools" — subagent /
+//     dispatcher prompt sent without the standard system reminder (also why
+//     these entries land under cwd "(unknown)" in the reader).
+//
+// All four were observed verbatim in production logs. They are kept as
+// startswith matches (not regex) so the cost is constant per entry; extend
+// this list when new patterns are spotted rather than trying to be clever.
+var syntheticCLIPrefixes = []string{
+	"[SUGGESTION MODE:",
+	"Base directory for this skill:",
+	"This session is being continued from a previous conversation",
+	"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools",
+	// opencode's auto-summarization equivalent of Claude Code's compaction.
+	"Create a new anchored summary from the conversation history above",
+}
+
+// isSyntheticCLIPrompt reports whether the message is a CLI-internal prompt
+// rather than human-typed content. Detection looks at the FIRST text block
+// only — if a real user message happened to mix human prose with one of
+// these prefixes later in the array, that prose is preserved.
+func isSyntheticCLIPrompt(blocks []Block) bool {
+	for _, b := range blocks {
+		if b.Type != "text" {
+			continue
+		}
+		trimmed := strings.TrimSpace(b.Text)
+		for _, p := range syntheticCLIPrefixes {
+			if strings.HasPrefix(trimmed, p) {
+				return true
+			}
+		}
+		return false
 	}
 	return false
 }
@@ -221,6 +277,41 @@ func extractFromMessages(peek []byte, arrayKey string, blockFn func(gjson.Result
 	return walkContent(lastContent, blockFn, maxText)
 }
 
+// extractIfLastIsUser returns blocks only when the FINAL entry in arrayKey is
+// role:"user". For OpenAI-shaped requests where tool roundtrips use a
+// different role (Chat: role:"tool"; Responses: typed function_call_output
+// items with no role), this guard suppresses the duplicate-prompt re-log on
+// every agent-loop iteration. Returns nil when the array is empty, missing,
+// or its last entry is not user-role.
+func extractIfLastIsUser(peek []byte, arrayKey string, blockFn func(gjson.Result, int) (Block, bool), maxText int) []Block {
+	last, ok := lastUserContent(gjson.GetBytes(peek, arrayKey))
+	if !ok {
+		return nil
+	}
+	return walkContent(last, blockFn, maxText)
+}
+
+// lastUserContent returns the `content` field of arr's final entry iff that
+// entry's role is "user". The (gjson.Result, bool) shape mirrors gjson's own
+// idioms so callers can distinguish "no user prompt to log" from "found but
+// empty content."
+func lastUserContent(arr gjson.Result) (gjson.Result, bool) {
+	if !arr.IsArray() {
+		return gjson.Result{}, false
+	}
+	var last gjson.Result
+	var seen bool
+	arr.ForEach(func(_, msg gjson.Result) bool {
+		last = msg
+		seen = true
+		return true
+	})
+	if !seen || last.Get("role").String() != "user" {
+		return gjson.Result{}, false
+	}
+	return last.Get("content"), true
+}
+
 // walkContent handles the dual-shape `content` field shared by Anthropic and
 // OpenAI chat: a bare string is shorthand for a single text block, an array
 // is a list of typed blocks. Returns an empty slice (not nil) when the user
@@ -325,29 +416,22 @@ func maskOpenAIImageURL(url string) Block {
 // `input` field can be either a bare string (shorthand) or an array of typed
 // items. The item types are prefixed `input_*` to distinguish from chat's
 // untyped `text`/`image_url`.
+//
+// Like OpenAI Chat, this skips when the LAST input item is not a user-role
+// message — agent-loop continuations append function_call_output (and
+// reasoning) items without a user role, so without this guard the original
+// prompt would be re-logged on every iteration.
 func extractOpenAIResponses(peek []byte, maxText int) []Block {
 	input := gjson.GetBytes(peek, "input")
 	if input.Type == gjson.String {
 		text, trunc, orig := truncateText(input.String(), maxText)
 		return []Block{textBlock(text, trunc, orig)}
 	}
-	if !input.IsArray() {
+	last, ok := lastUserContent(input)
+	if !ok {
 		return nil
 	}
-	var lastContent gjson.Result
-	var found bool
-	input.ForEach(func(_, msg gjson.Result) bool {
-		if msg.Get("role").String() != "user" {
-			return true
-		}
-		lastContent = msg.Get("content")
-		found = true
-		return true
-	})
-	if !found {
-		return nil
-	}
-	return walkContent(lastContent, extractOpenAIResponsesBlock, maxText)
+	return walkContent(last, extractOpenAIResponsesBlock, maxText)
 }
 
 func extractOpenAIResponsesBlock(item gjson.Result, maxText int) (Block, bool) {

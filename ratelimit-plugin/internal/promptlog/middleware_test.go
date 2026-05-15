@@ -17,7 +17,7 @@ func init() {
 func newTestRig(t *testing.T) (*gin.Engine, *Writer, string) {
 	t.Helper()
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 16)
+	w, err := NewWriter(dir, 16, nil, TemplatesConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestMiddleware_LogsAnthropic(t *testing.T) {
 
 func TestMiddleware_CapturesRejectedRequest(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16)
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
 	cfg := &Config{Enabled: true, Dir: dir, MaxTextBytes: 1024, QueueSize: 16}
 	r := gin.New()
 	r.Use(Middleware(cfg, w))
@@ -102,7 +102,7 @@ func TestMiddleware_SkipsUnknownPaths(t *testing.T) {
 
 func TestMiddleware_SkipsWhenDisabled(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16)
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
 	defer w.Close()
 	cfg := &Config{Enabled: false, Dir: dir}
 	r := gin.New()

@@ -12,11 +12,13 @@ import type {
   PromptDetail,
   PromptMessage,
   PromptSession,
+  PromptTemplate,
   PromptUserSummary,
 } from '@/types/prompts';
 import styles from './PromptsPage.module.scss';
 
 const DEFAULT_LIMIT = 200;
+const INLINE_TEMPLATES_STORAGE_KEY = 'prompts.inlineTemplates';
 
 function relativeTime(iso?: string): string {
   if (!iso) return '—';
@@ -80,6 +82,50 @@ export function PromptsPage() {
 
   const [pasteInput, setPasteInput] = useState('');
 
+  // Templates: cache fetched bodies by hash so the right-pane "expand" button
+  // resolves instantly on repeat clicks. inlineTemplates=true asks the server
+  // to splice template bodies back into prompts so the UI doesn't have to —
+  // useful when the user wants raw grep-friendly text everywhere. Toggle is
+  // persisted in localStorage so per-user preference sticks across reloads.
+  const [inlineTemplates, setInlineTemplates] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(INLINE_TEMPLATES_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [templateCache, setTemplateCache] = useState<Record<string, PromptTemplate>>({});
+  const [templateLoading, setTemplateLoading] = useState<Set<string>>(new Set());
+  const [expandedTemplateInDetail, setExpandedTemplateInDetail] = useState(false);
+
+  const persistInlineTemplates = useCallback((v: boolean) => {
+    setInlineTemplates(v);
+    try {
+      localStorage.setItem(INLINE_TEMPLATES_STORAGE_KEY, v ? '1' : '0');
+    } catch {
+      /* localStorage unavailable — preference resets next reload */
+    }
+  }, []);
+
+  const fetchTemplate = useCallback(async (hash: string): Promise<PromptTemplate | null> => {
+    if (templateCache[hash]) return templateCache[hash];
+    if (templateLoading.has(hash)) return null;
+    setTemplateLoading((prev) => new Set(prev).add(hash));
+    try {
+      const tpl = await promptsApi.getTemplate(hash);
+      setTemplateCache((prev) => ({ ...prev, [hash]: tpl }));
+      return tpl;
+    } catch {
+      return null;
+    } finally {
+      setTemplateLoading((prev) => {
+        const next = new Set(prev);
+        next.delete(hash);
+        return next;
+      });
+    }
+  }, [templateCache, templateLoading]);
+
   const loadUsers = useCallback(async () => {
     setUsersLoading(true);
     setUsersError('');
@@ -98,8 +144,12 @@ export function PromptsPage() {
     setDetailError('');
     setSelectedMessage(null);
     setSelectedSession(null);
+    setExpandedTemplateInDetail(false);
     try {
-      const res = await promptsApi.getDetail(keyOrHash, DEFAULT_LIMIT);
+      const res = await promptsApi.getDetail(keyOrHash, {
+        limit: DEFAULT_LIMIT,
+        inlineTemplates,
+      });
       setDetail(res);
       // Expand all CWDs by default for compact overview.
       setExpandedCWDs(new Set(res.groups.map((g) => g.cwd)));
@@ -109,7 +159,7 @@ export function PromptsPage() {
     } finally {
       setDetailLoading(false);
     }
-  }, [t]);
+  }, [t, inlineTemplates]);
 
   const handleRefresh = useCallback(async () => {
     await loadUsers();
@@ -152,6 +202,9 @@ export function PromptsPage() {
   const handleSelectMessage = (sess: PromptSession, msg: PromptMessage) => {
     setSelectedSession(sess);
     setSelectedMessage(msg);
+    setExpandedTemplateInDetail(false);
+    // Pre-warm cache so the detail panel renders the body without flicker.
+    if (msg.prompt_template) void fetchTemplate(msg.prompt_template);
   };
 
   const closeDetail = () => {
@@ -179,6 +232,18 @@ export function PromptsPage() {
             defaultValue: 'Browse captured user prompts grouped by working directory and session.',
           })}
         </p>
+        <div className={styles.headerActions}>
+          <label className={styles.toggleLabel}>
+            <input
+              type="checkbox"
+              checked={inlineTemplates}
+              onChange={(e) => persistInlineTemplates(e.target.checked)}
+            />
+            {t('prompts_page.inline_templates', {
+              defaultValue: 'Show templates inline (server-side splice)',
+            })}
+          </label>
+        </div>
       </div>
 
       {(usersError || detailError) && (
@@ -315,7 +380,11 @@ export function PromptsPage() {
                                 {sess.messages.map((msg) => {
                                   const key = messageKey(sess.session_id, msg.ts);
                                   const isSelected = key === selectedMessageKey;
-                                  const preview = msg.prompt ?? '';
+                                  const tplHash = msg.prompt_template;
+                                  const tpl = tplHash ? templateCache[tplHash] : undefined;
+                                  const tplLabel = tpl?.label;
+                                  const tplLen = tpl?.len;
+                                  const suffix = (msg.prompt ?? '').replace(/\s+/g, ' ');
                                   return (
                                     <button
                                       key={key}
@@ -326,7 +395,13 @@ export function PromptsPage() {
                                       <span className={styles.msgTime}>{timeOfDay(msg.ts)}</span>
                                       <span className={styles.msgModel}>{msg.model || '—'}</span>
                                       <span className={styles.msgText}>
-                                        {preview.replace(/\s+/g, ' ').slice(0, 200) || '(empty)'}
+                                        {tplHash && (
+                                          <span className={styles.tplChip} title={tpl?.text || `template ${tplHash}`}>
+                                            {tplLabel ? `📋 ${tplLabel}` : `📋 ${tplHash}`}
+                                            {tplLen ? ` · ${tplLen}c` : ''}
+                                          </span>
+                                        )}
+                                        {suffix.slice(0, 200) || (tplHash ? '' : '(empty)')}
                                       </span>
                                       <span className={`${styles.msgStatus} ${statusClass(msg.status)}`}>
                                         {msg.status || ''}
@@ -387,7 +462,47 @@ export function PromptsPage() {
               </div>
               <div>
                 <div className={styles.detailMetaKey} style={{ marginBottom: 4 }}>Prompt</div>
-                <div className={styles.detailPrompt}>{selectedMessage.prompt || '(empty)'}</div>
+                {(() => {
+                  const tplHash = selectedMessage.prompt_template;
+                  if (!tplHash) {
+                    return <div className={styles.detailPrompt}>{selectedMessage.prompt || '(empty)'}</div>;
+                  }
+                  const tpl = templateCache[tplHash];
+                  const loading = templateLoading.has(tplHash);
+                  return (
+                    <div>
+                      <div className={styles.tplBanner}>
+                        <span className={styles.tplChip} title={tpl?.text}>
+                          📋 {tpl?.label || tplHash}
+                          {tpl?.len ? ` · ${tpl.len}c` : ''}
+                          {tpl?.occurrences ? ` · ×${tpl.occurrences}` : ''}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            if (!templateCache[tplHash]) void fetchTemplate(tplHash);
+                            setExpandedTemplateInDetail((v) => !v);
+                          }}
+                          disabled={loading}
+                        >
+                          {expandedTemplateInDetail ? 'Hide template' : 'Show template'}
+                        </Button>
+                      </div>
+                      {expandedTemplateInDetail && (
+                        <div className={styles.detailPrompt}>
+                          {loading
+                            ? '(loading template…)'
+                            : tpl?.text || '(template not found)'}
+                          {selectedMessage.prompt}
+                        </div>
+                      )}
+                      {!expandedTemplateInDetail && (
+                        <div className={styles.detailPrompt}>{selectedMessage.prompt || '(suffix is empty)'}</div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               {selectedMessage.blocks && selectedMessage.blocks.length > 0 && (
                 <div>

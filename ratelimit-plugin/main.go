@@ -85,13 +85,20 @@ func main() {
 		plogCfg.Dir = filepath.Join(filepath.Dir(absCfg), plogCfg.Dir)
 	}
 	var plogWriter *promptlog.Writer
+	var plogTemplates *promptlog.TemplateStore
 	if plogCfg.IsEnabled() {
-		plogWriter, err = promptlog.NewWriter(plogCfg.Dir, plogCfg.QueueSize)
+		plogTemplates, err = promptlog.NewTemplateStore(plogCfg.Dir)
+		if err != nil {
+			log.Warnf("promptlog: templates init failed, disabled: %v", err)
+			plogTemplates = nil
+		}
+		plogWriter, err = promptlog.NewWriter(plogCfg.Dir, plogCfg.QueueSize, plogTemplates, plogCfg.Templates)
 		if err != nil {
 			log.Warnf("promptlog: writer init failed, disabled: %v", err)
 			plogCfg = &promptlog.Config{}
 		} else {
-			log.Infof("promptlog: enabled (dir=%s max_text=%d queue=%d)", plogCfg.Dir, plogCfg.MaxTextBytes, plogCfg.QueueSize)
+			log.Infof("promptlog: enabled (dir=%s max_text=%d queue=%d templates=%v)",
+				plogCfg.Dir, plogCfg.MaxTextBytes, plogCfg.QueueSize, plogCfg.Templates.Enabled)
 		}
 	}
 
@@ -183,7 +190,7 @@ func main() {
 			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, c *config.Config) {
 				usagepush.Register(engine, c)
 				usagestore.RegisterRoutes(engine, c, ustore)
-				promptlog.RegisterReadHandlers(engine, c, plogCfg)
+				promptlog.RegisterReadHandlers(engine, c, plogCfg, plogTemplates)
 			}),
 		)
 

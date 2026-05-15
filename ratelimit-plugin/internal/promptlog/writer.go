@@ -34,9 +34,13 @@ type Entry struct {
 	CWD           string `json:"cwd,omitempty"`
 
 	// Prompt is the joined human-readable text for quick grep / dashboarding.
-	// Blocks is the structured detail (typed blocks, image metadata, etc).
-	Prompt string  `json:"prompt,omitempty"`
-	Blocks []Block `json:"blocks"`
+	// When PromptTemplate is set, Prompt holds only the SUFFIX after the
+	// template prefix; reconstruct the original by concatenating the
+	// template body + Prompt. Blocks is the structured detail (typed
+	// blocks, image metadata, etc) and is NEVER templated.
+	Prompt         string  `json:"prompt,omitempty"`
+	PromptTemplate string  `json:"prompt_template,omitempty"`
+	Blocks         []Block `json:"blocks"`
 
 	BodyTruncated bool `json:"body_truncated,omitempty"`
 }
@@ -46,10 +50,18 @@ type Entry struct {
 // dropped (counted via Dropped) rather than back-pressuring the request path.
 // Losing a log line in exchange for never blocking a real user request is the
 // right trade-off for analytics logging.
+//
+// When templates is non-nil, each entry's prompt is matched against the
+// store before encoding: a hit replaces the prefix with the template hash
+// (Entry.PromptTemplate) and shortens Entry.Prompt to the suffix only. This
+// happens on the writer goroutine so the request path stays free of any
+// template-related cost beyond the channel send.
 type Writer struct {
-	dir string
-	ch  chan *Entry
-	wg  sync.WaitGroup
+	dir       string
+	ch        chan *Entry
+	wg        sync.WaitGroup
+	templates *TemplateStore
+	detector  *templateDetector
 
 	dropped atomic.Uint64
 
@@ -61,7 +73,10 @@ type Writer struct {
 // goroutine. The directory is created with 0755 if missing; an unwritable dir
 // is reported as an error so misconfiguration is loud at startup rather than
 // silently swallowed at request time.
-func NewWriter(dir string, queueSize int) (*Writer, error) {
+//
+// templates may be nil to disable prompt-templating. When non-nil, the
+// writer also seeds and runs a templateDetector with cfg.Templates.
+func NewWriter(dir string, queueSize int, templates *TemplateStore, cfg TemplatesConfig) (*Writer, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("promptlog: empty dir")
 	}
@@ -72,8 +87,12 @@ func NewWriter(dir string, queueSize int) (*Writer, error) {
 		queueSize = defaultQueueSize
 	}
 	w := &Writer{
-		dir: dir,
-		ch:  make(chan *Entry, queueSize),
+		dir:       dir,
+		ch:        make(chan *Entry, queueSize),
+		templates: templates,
+	}
+	if templates != nil && cfg.Enabled {
+		w.detector = newTemplateDetector(templates, cfg)
 	}
 	w.wg.Add(1)
 	go w.run()
@@ -110,7 +129,9 @@ func (w *Writer) Dropped() uint64 {
 }
 
 // Close stops the background goroutine, flushes the current file, and waits
-// for it to exit. Safe to call multiple times.
+// for it to exit. Safe to call multiple times. Also flushes the template
+// store's stats (occurrence/last-seen) — appended templates are durable
+// already, but Touch() updates only land on disk via Flush.
 func (w *Writer) Close() {
 	if w == nil {
 		return
@@ -120,6 +141,11 @@ func (w *Writer) Close() {
 		close(w.ch)
 	})
 	w.wg.Wait()
+	if w.templates != nil {
+		if err := w.templates.Flush(); err != nil {
+			log.Warnf("promptlog: templates flush on close: %v", err)
+		}
+	}
 }
 
 func (w *Writer) run() {
@@ -169,6 +195,12 @@ func (w *Writer) run() {
 
 	flushTicker := time.NewTicker(2 * time.Second)
 	defer flushTicker.Stop()
+	// Templates flush on a slower cadence — Touch updates only count
+	// statistics, so 60 s of churn loss on crash is acceptable, and
+	// rewriting the whole file every 2 s would dominate I/O once the
+	// catalog grows past a few hundred templates.
+	tplFlushTicker := time.NewTicker(60 * time.Second)
+	defer tplFlushTicker.Stop()
 
 	encode := json.Marshal
 
@@ -181,6 +213,20 @@ func (w *Writer) run() {
 			ts := e.Timestamp
 			if ts.IsZero() {
 				ts = time.Now()
+			}
+			// Templating must run BEFORE encode so PromptTemplate / shortened
+			// Prompt land in the JSONL line. Detector observes the original
+			// (untemplated) prompt to find new patterns; ordering matters
+			// only for the entry written to disk.
+			if w.detector != nil {
+				w.detector.observe(e.Prompt, ts)
+			}
+			if w.templates != nil {
+				if hash, suffix, hit := w.templates.Match(e.Prompt); hit {
+					e.PromptTemplate = hash
+					e.Prompt = suffix
+					w.templates.Touch(hash, ts)
+				}
 			}
 			date := ts.UTC().Format("2006-01-02")
 			if !ensureFile(date) {
@@ -202,6 +248,12 @@ func (w *Writer) run() {
 			if buf != nil {
 				if err := buf.Flush(); err != nil {
 					log.Warnf("promptlog: periodic flush: %v", err)
+				}
+			}
+		case <-tplFlushTicker.C:
+			if w.templates != nil {
+				if err := w.templates.Flush(); err != nil {
+					log.Warnf("promptlog: templates periodic flush: %v", err)
 				}
 			}
 		}

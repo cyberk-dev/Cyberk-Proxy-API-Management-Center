@@ -103,6 +103,30 @@ prompt_log:
   # is the writer goroutine and you'll want a different storage backend.
   queue_size: 1024
 
+  # Dynamic prompt-template detection. The writer maintains an in-memory
+  # rune-trie over the last `window` prompts; when a prefix of length ≥
+  # `min_len` runes is shared by ≥ `min_occur` distinct prompts, it is
+  # registered as a template. Future entries with that prefix get encoded
+  # as `prompt_template: <hash>` + the suffix only — drastically shrinking
+  # the JSONL log when the same skill body, slash command, or compaction
+  # summary recurs.
+  #
+  # Templates persist to <dir>/templates.jsonl. Two read endpoints expose
+  # them: GET /v0/management/prompts/templates (catalog) and
+  # GET /v0/management/prompts/templates/:hash (full text). The detail
+  # endpoint accepts ?inline_templates=1 to splice bodies back into prompts
+  # server-side for clients that want self-contained responses.
+  #
+  # Omit `templates:` entirely to inherit defaults; set `enabled: false` to
+  # disable detection (existing templates still apply via Match — clear
+  # templates.jsonl to fully revert).
+  templates:
+    enabled: true
+    min_len: 200          # chars; below this the prefix is too generic
+    min_occur: 3          # distinct prompts that must share the prefix
+    window: 5000          # rolling observation window
+    scan_every_seconds: 300
+
 # ── Weighted routing for Codex (optional) ────────────────────────────────────
 # Distribute Codex requests across upstream accounts proportionally to their
 # subscription weight, derived from the `plan_type` claim embedded in each

@@ -12,7 +12,7 @@ import (
 
 func TestWriter_WritesJSONL(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 8)
+	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestWriter_WritesJSONL(t *testing.T) {
 
 func TestWriter_RotatesByDate(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 8)
+	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestWriter_RotatesByDate(t *testing.T) {
 func TestWriter_DropsOnFullQueue(t *testing.T) {
 	dir := t.TempDir()
 	// Tiny queue + we never let the goroutine drain by submitting fast.
-	w, err := NewWriter(dir, 1)
+	w, err := NewWriter(dir, 1, nil, TemplatesConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,14 +84,14 @@ func TestWriter_DropsOnFullQueue(t *testing.T) {
 }
 
 func TestWriter_RejectsEmptyDir(t *testing.T) {
-	if _, err := NewWriter("", 8); err == nil {
+	if _, err := NewWriter("", 8, nil, TemplatesConfig{}); err == nil {
 		t.Fatal("expected error for empty dir")
 	}
 }
 
 func TestWriter_SubmitAfterClose(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 8)
+	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

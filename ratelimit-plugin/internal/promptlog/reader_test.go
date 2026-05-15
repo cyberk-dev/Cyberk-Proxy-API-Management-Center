@@ -183,3 +183,63 @@ func TestMakeKeyHint(t *testing.T) {
 		t.Errorf("long key hint: %q", MakeKeyHint("sk-abcdef-1234"))
 	}
 }
+
+func TestBuildDetail_PreservesPromptTemplate(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-x")
+	writeJSONL(t, dir, "2026-05-15", Entry{
+		KeyHash:        hash,
+		Timestamp:      time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC),
+		CWD:            "/p",
+		SessionID:      "s",
+		Prompt:         " suffix tail",
+		PromptTemplate: "abc123abc123",
+	})
+	detail, err := BuildDetail(dir, hash, "", false, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := detail.Groups[0].Sessions[0].Messages[0]
+	if m.PromptTemplate != "abc123abc123" {
+		t.Errorf("template hash got %q", m.PromptTemplate)
+	}
+	if m.Prompt != " suffix tail" {
+		t.Errorf("prompt got %q", m.Prompt)
+	}
+}
+
+func TestInlineTemplates_SplicesBody(t *testing.T) {
+	store, _ := NewTemplateStore(t.TempDir())
+	tpl, _ := store.Register("HEAD-BODY-", "test", time.Now())
+
+	detail := &Detail{
+		Groups: []CWDGroup{{
+			Sessions: []Session{{
+				Messages: []Message{
+					{Prompt: "tail-A", PromptTemplate: tpl.Hash},
+					{Prompt: "untemplated", PromptTemplate: ""},
+					{Prompt: "tail-B", PromptTemplate: "deadbeefcafe"}, // unknown hash
+				},
+			}},
+		}},
+	}
+	InlineTemplates(detail, store)
+	msgs := detail.Groups[0].Sessions[0].Messages
+	if msgs[0].Prompt != "HEAD-BODY-tail-A" || msgs[0].PromptTemplate != "" {
+		t.Errorf("templated message not spliced: %+v", msgs[0])
+	}
+	if msgs[1].Prompt != "untemplated" {
+		t.Errorf("non-templated touched: %+v", msgs[1])
+	}
+	if msgs[2].Prompt != "tail-B" || msgs[2].PromptTemplate != "deadbeefcafe" {
+		t.Errorf("unknown-hash should be left as-is: %+v", msgs[2])
+	}
+}
+
+func TestInlineTemplates_NilStoreSafe(t *testing.T) {
+	detail := &Detail{Groups: []CWDGroup{{Sessions: []Session{{Messages: []Message{{Prompt: "x", PromptTemplate: "y"}}}}}}}
+	InlineTemplates(detail, nil)
+	if detail.Groups[0].Sessions[0].Messages[0].PromptTemplate != "y" {
+		t.Errorf("nil store should not mutate")
+	}
+}
