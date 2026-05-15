@@ -327,4 +327,13 @@ alongside `config.yaml`.
 go test -race -cover ./...
 ```
 
-Current coverage: ~83% of statements in `internal/ratelimit`.
+Current coverage (by package):
+
+| Package | Coverage |
+|---|---|
+| `internal/ratelimit` | 74% |
+| `internal/promptlog` | 77% |
+| `internal/policy` | 47% |
+| `internal/weightedselector` | 85% |
+| `internal/usagestore` | 51% |
+| `internal/usagepush` | 86% |
