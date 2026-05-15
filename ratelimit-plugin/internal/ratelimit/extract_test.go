@@ -178,9 +178,12 @@ func TestExtractModel_EmptyBody(t *testing.T) {
 }
 
 func TestPeekJSONBodyResult_TruncatedFlag(t *testing.T) {
+	// Padding sized to exceed maxBodyPeek by ~1 MiB so the test stays in
+	// sync if the ceiling moves again (it bumped 4→16 MiB to handle inline
+	// image base64 — see comment on maxBodyPeek).
 	var buf bytes.Buffer
 	buf.WriteString(`{"model":"gpt-4","padding":"`)
-	buf.WriteString(strings.Repeat("x", 5<<20))
+	buf.WriteString(strings.Repeat("x", maxBodyPeek+(1<<20)))
 	buf.WriteString(`"}`)
 	r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(buf.Bytes()))
 	r.Header.Set("Content-Type", "application/json")

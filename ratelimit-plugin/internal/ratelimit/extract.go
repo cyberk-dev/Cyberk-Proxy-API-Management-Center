@@ -13,11 +13,13 @@ import (
 // maxBodyPeek caps how much of a JSON request body we buffer to extract
 // fields like "model" or "service_tier". Set high enough to cover realistic
 // large multi-turn conversations from the OpenAI Python SDK (which serializes
-// `messages` before `service_tier`), at the cost of up to maxBodyPeek bytes
-// of memory per concurrent JSON request. Bodies larger than this are still
-// forwarded in full — only the policy/limit decisions are made from the
-// prefix, and PeekResult.Truncated lets callers warn when the cap is hit.
-const maxBodyPeek = 4 << 20
+// `messages` before `service_tier`), plus inline image/document base64 payloads
+// (a single 1 MiB image becomes ~1.35 MiB base64; multi-image requests easily
+// pass 4 MiB), at the cost of up to maxBodyPeek bytes of memory per concurrent
+// JSON request. Bodies larger than this are still forwarded in full — only
+// policy/limit/promptlog decisions are made from the prefix, and
+// PeekResult.Truncated lets callers warn when the cap is hit.
+const maxBodyPeek = 16 << 20
 
 // peekCacheKey is the gin.Context key under which body-peek results are
 // cached so multiple middlewares (ratelimit, policy) share one read.

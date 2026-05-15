@@ -30,6 +30,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/cyberk/ratelimit-plugin/internal/policy"
+	"github.com/cyberk/ratelimit-plugin/internal/promptlog"
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
 	"github.com/cyberk/ratelimit-plugin/internal/usagepush"
 	"github.com/cyberk/ratelimit-plugin/internal/usagestore"
@@ -71,6 +72,27 @@ func main() {
 	policyStore := policy.NewConfigStore(policyCfg)
 	if policyCfg.Enabled() {
 		log.Infof("policy: enabled (block_service_tiers=%v)", policyCfg.BlockServiceTiers)
+	}
+
+	plogCfg, err := promptlog.LoadFromFile(absCfg)
+	if err != nil {
+		log.Warnf("promptlog: load failed, disabled: %v", err)
+		plogCfg = &promptlog.Config{}
+	}
+	// Default the dir to <config-dir>/prompts when enabled with no explicit
+	// path, mirroring how state defaults to <config-dir>/ratelimit-state.json.
+	if plogCfg.IsEnabled() && !filepath.IsAbs(plogCfg.Dir) {
+		plogCfg.Dir = filepath.Join(filepath.Dir(absCfg), plogCfg.Dir)
+	}
+	var plogWriter *promptlog.Writer
+	if plogCfg.IsEnabled() {
+		plogWriter, err = promptlog.NewWriter(plogCfg.Dir, plogCfg.QueueSize)
+		if err != nil {
+			log.Warnf("promptlog: writer init failed, disabled: %v", err)
+			plogCfg = &promptlog.Config{}
+		} else {
+			log.Infof("promptlog: enabled (dir=%s max_text=%d queue=%d)", plogCfg.Dir, plogCfg.MaxTextBytes, plogCfg.QueueSize)
+		}
 	}
 
 	limiter := ratelimit.NewLimiter()
@@ -145,12 +167,16 @@ func main() {
 	ustore := usagestore.New()
 	ustore.RegisterPlugin()
 
-	// Policy runs first: blocked requests must not consume rate-limit budget.
+	// Promptlog runs first: it must observe *every* request, including those
+	// rejected by policy/ratelimit, since rejected attempts are part of the
+	// behavior we want to analyze. Policy runs next so blocked requests still
+	// don't consume rate-limit budget.
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(absCfg).
 		WithServerOptions(
 			api.WithMiddleware(
+				promptlog.Middleware(plogCfg, plogWriter),
 				policy.Middleware(policyStore),
 				ratelimit.Middleware(store, limiter),
 			),
@@ -180,6 +206,12 @@ func main() {
 	runErr := svc.Run(ctx)
 	cancel()
 	persistWG.Wait()
+	if plogWriter != nil {
+		plogWriter.Close()
+		if dropped := plogWriter.Dropped(); dropped > 0 {
+			log.Warnf("promptlog: %d entries dropped due to full queue", dropped)
+		}
+	}
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		log.Fatalf("cliproxy run: %v", runErr)

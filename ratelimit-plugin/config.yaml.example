@@ -69,6 +69,40 @@ policy:
   block_service_tiers:
     - priority
 
+# ── Prompt logging (optional) ────────────────────────────────────────────────
+# Capture the final user message of every chat request to a daily-rotated
+# JSONL file for offline analysis. Earlier turns of a conversation are NOT
+# duplicated per request — the previous request's log already contains them,
+# so logging only the last user message keeps the file small while preserving
+# full user intent across the session.
+#
+# Content normalization:
+#   - text blocks      → kept verbatim, middle-truncated when > max_text_bytes
+#   - image / document → base64 stripped, replaced with {media_type, bytes, sha256}
+#   - tool_use/result  → dropped (not user-authored content)
+#
+# Supported routes: /v1/messages (Anthropic), /v1/chat/completions,
+# /v1/responses, /v1beta/models/*:(stream)generateContent. Other paths are
+# ignored. Both successful and rejected requests are logged — promptlog runs
+# before policy/ratelimit so blocked attempts still appear in the log.
+#
+# Output: <dir>/prompts-YYYY-MM-DD.jsonl (UTC date). One JSON object per line.
+# Writes are async + non-blocking; queue overflow drops the entry (counted in
+# logs on shutdown) rather than back-pressuring the request path.
+#
+# Omit this block entirely to disable. Setting `enabled: false` also disables.
+prompt_log:
+  enabled: true
+  # Relative paths resolve to <config-dir>/<dir>. Absolute paths are used as-is.
+  dir: prompts
+  # Per-block cap; longer text is middle-truncated keeping the first/last
+  # halves so the user's intent at start and end of long pastes survives.
+  max_text_bytes: 51200
+  # Bounded queue for the async writer. If sustained traffic exceeds disk
+  # write speed, increase this; if it grows much beyond ~10k, the bottleneck
+  # is the writer goroutine and you'll want a different storage backend.
+  queue_size: 1024
+
 # ── Weighted routing for Codex (optional) ────────────────────────────────────
 # Distribute Codex requests across upstream accounts proportionally to their
 # subscription weight, derived from the `plan_type` claim embedded in each
