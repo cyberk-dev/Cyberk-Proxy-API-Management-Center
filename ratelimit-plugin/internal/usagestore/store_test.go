@@ -207,53 +207,211 @@ func TestSummarySnapshot_SinceFiltersAll(t *testing.T) {
 	}
 }
 
-func TestKeySnapshot_ExistingKey(t *testing.T) {
+func TestKeyDetail_AggregatesFromCounters(t *testing.T) {
 	s := seedStore(t)
-	snap := s.KeySnapshot("anderson")
+	now := time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC)
+	detail := s.KeyDetail("anderson", time.Time{}, 0, nil, now)
 
-	if snap == nil {
-		t.Fatal("anderson snapshot should not be nil")
+	if detail == nil {
+		t.Fatal("anderson detail should not be nil")
 	}
-	if snap.TotalRequests != 4 {
-		t.Fatalf("total_requests: want 4, got %d", snap.TotalRequests)
+	if detail.APIKey != "anderson" {
+		t.Fatalf("api_key: want anderson, got %q", detail.APIKey)
 	}
-	if snap.SuccessCount != 3 {
-		t.Fatalf("success_count: want 3, got %d", snap.SuccessCount)
+	if detail.TotalRequests != 4 {
+		t.Fatalf("total_requests: want 4, got %d", detail.TotalRequests)
 	}
-	if snap.FailureCount != 1 {
-		t.Fatalf("failure_count: want 1, got %d", snap.FailureCount)
+	if detail.SuccessCount != 3 {
+		t.Fatalf("success_count: want 3, got %d", detail.SuccessCount)
 	}
-	if len(snap.APIs) != 1 {
-		t.Fatalf("api count: want 1, got %d", len(snap.APIs))
+	if detail.FailureCount != 1 {
+		t.Fatalf("failure_count: want 1, got %d", detail.FailureCount)
 	}
-	if _, ok := snap.APIs["anderson"]; !ok {
-		t.Fatal("anderson key should be in snapshot")
+	if detail.InputTokens != 10223+36716+500+800 {
+		t.Fatalf("input_tokens: want %d, got %d", 10223+36716+500+800, detail.InputTokens)
 	}
-	gpt := snap.APIs["anderson"].Models["gpt-5.4"]
-	if gpt == nil {
-		t.Fatal("gpt-5.4 model missing")
+	if detail.OutputTokens != 199+5855+0+400 {
+		t.Fatalf("output_tokens: want %d, got %d", 199+5855+400, detail.OutputTokens)
 	}
-	if len(gpt.Details) != 3 {
-		t.Fatalf("gpt-5.4 details: want 3, got %d", len(gpt.Details))
+	if detail.CachedTokens != 35840 {
+		t.Fatalf("cached_tokens: want 35840, got %d", detail.CachedTokens)
+	}
+	if detail.ReasoningTokens != 66 {
+		t.Fatalf("reasoning_tokens: want 66, got %d", detail.ReasoningTokens)
+	}
+	if len(detail.Models) != 2 {
+		t.Fatalf("models: want 2, got %d", len(detail.Models))
+	}
+	// gpt-5.4 has more requests than qwen3.5-plus → it should sort first.
+	if detail.Models[0].Model != "gpt-5.4" {
+		t.Fatalf("model[0]: want gpt-5.4, got %s", detail.Models[0].Model)
+	}
+	gpt := detail.Models[0]
+	if gpt.TotalRequests != 3 || gpt.SuccessCount != 2 || gpt.FailureCount != 1 {
+		t.Fatalf("gpt-5.4 stats unexpected: %+v", gpt)
+	}
+	if gpt.LastActive == "" {
+		t.Fatal("gpt-5.4 last_active should be set")
 	}
 }
 
-func TestKeySnapshot_MissingKey(t *testing.T) {
-	s := seedStore(t)
-	snap := s.KeySnapshot("nonexistent")
-	if snap != nil {
-		t.Fatal("missing key should return nil")
+func TestKeyDetail_RespectsLimit(t *testing.T) {
+	s := New()
+	base := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 1000; i++ {
+		s.HandleUsage(context.Background(), usage.Record{
+			APIKey:      "bulk",
+			Model:       "test-model",
+			RequestedAt: base.Add(time.Duration(i) * time.Second),
+			Detail:      usage.Detail{InputTokens: int64(i), TotalTokens: int64(i)},
+		})
+	}
+
+	detail := s.KeyDetail("bulk", time.Time{}, 100, nil, base.Add(time.Hour))
+	if detail == nil {
+		t.Fatal("bulk detail should not be nil")
+	}
+	if got := len(detail.RecentDetails); got != 100 {
+		t.Fatalf("recent_details: want 100, got %d", got)
+	}
+	if detail.TotalRequests != 1000 {
+		t.Fatalf("aggregate total_requests: want 1000, got %d", detail.TotalRequests)
+	}
+	// Returned details must be the newest 100.
+	wantNewest := base.Add(999 * time.Second).Format(time.RFC3339Nano)
+	if detail.RecentDetails[0].Timestamp != wantNewest {
+		t.Fatalf("newest timestamp: want %s, got %s", wantNewest, detail.RecentDetails[0].Timestamp)
+	}
+	// And they must be sorted desc.
+	for i := 1; i < len(detail.RecentDetails); i++ {
+		if detail.RecentDetails[i].Timestamp > detail.RecentDetails[i-1].Timestamp {
+			t.Fatalf("recent_details not desc-sorted at %d", i)
+		}
 	}
 }
 
-func TestKeySnapshot_DeepCopy(t *testing.T) {
-	s := seedStore(t)
-	snap1 := s.KeySnapshot("anderson")
-	snap2 := s.KeySnapshot("anderson")
+func TestKeyDetail_LimitClampedToMax(t *testing.T) {
+	s := New()
+	s.HandleUsage(context.Background(), usage.Record{
+		APIKey:      "k",
+		Model:       "m",
+		RequestedAt: time.Now(),
+		Detail:      usage.Detail{TotalTokens: 1},
+	})
+	detail := s.KeyDetail("k", time.Time{}, 999999, nil, time.Now())
+	if detail == nil {
+		t.Fatal("detail should not be nil")
+	}
+	// Only one record exists; the cap shouldn't matter for this assertion —
+	// we just want to verify the call doesn't crash with a huge limit.
+	if len(detail.RecentDetails) != 1 {
+		t.Fatalf("recent_details: want 1, got %d", len(detail.RecentDetails))
+	}
+}
 
-	// Mutate snap1, verify snap2 is unaffected
-	snap1.APIs["anderson"].Models["gpt-5.4"].Details = nil
-	if snap2.APIs["anderson"].Models["gpt-5.4"].Details == nil {
-		t.Fatal("KeySnapshot should return deep copies")
+func TestKeyDetail_SinceFiltersDetailsAndAggregates(t *testing.T) {
+	s := seedStore(t)
+	since := time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC)
+
+	detail := s.KeyDetail("anderson", since, 0, nil, now)
+	if detail == nil {
+		t.Fatal("anderson detail should not be nil")
+	}
+	// Only May 3 and May 4 records for anderson/gpt-5.4 pass the filter.
+	if detail.TotalRequests != 2 {
+		t.Fatalf("filtered total_requests: want 2, got %d", detail.TotalRequests)
+	}
+	if len(detail.Models) != 1 {
+		t.Fatalf("filtered models: want 1, got %d", len(detail.Models))
+	}
+	if detail.Models[0].Model != "gpt-5.4" {
+		t.Fatalf("filtered model name: want gpt-5.4, got %s", detail.Models[0].Model)
+	}
+	if got := len(detail.RecentDetails); got != 2 {
+		t.Fatalf("filtered recent_details: want 2, got %d", got)
+	}
+	for _, d := range detail.RecentDetails {
+		ts, _ := time.Parse(time.RFC3339Nano, d.Timestamp)
+		if ts.Before(since) {
+			t.Fatalf("recent detail %s should be on/after since=%s", d.Timestamp, since)
+		}
+	}
+}
+
+func TestKeyDetail_NilForUnknownKey(t *testing.T) {
+	s := seedStore(t)
+	if d := s.KeyDetail("ghost", time.Time{}, 0, nil, time.Now()); d != nil {
+		t.Fatalf("unknown key should return nil, got %+v", d)
+	}
+}
+
+func TestKeyDetail_NilRateLimitResolver(t *testing.T) {
+	s := seedStore(t)
+	detail := s.KeyDetail("anderson", time.Time{}, 0, nil, time.Now())
+	if detail == nil {
+		t.Fatal("detail should not be nil")
+	}
+	if len(detail.RateLimits) != 0 {
+		t.Fatalf("nil resolver: want 0 rate_limits, got %d", len(detail.RateLimits))
+	}
+}
+
+type stubResolver struct {
+	limit  int
+	window time.Duration
+}
+
+func (s stubResolver) Resolve(_, _ string) (int, time.Duration, bool) {
+	return s.limit, s.window, s.limit > 0 && s.window > 0
+}
+
+func TestKeyDetail_RateLimitsCountAndResetsAt(t *testing.T) {
+	s := New()
+	// Three requests for the same model spaced 10 minutes apart.
+	t0 := time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		s.HandleUsage(context.Background(), usage.Record{
+			APIKey:      "u",
+			Model:       "claude",
+			RequestedAt: t0.Add(time.Duration(i*10) * time.Minute),
+			Detail:      usage.Detail{TotalTokens: 1},
+		})
+	}
+	now := t0.Add(25 * time.Minute) // window of 20m covers the last 2 requests
+	resolver := stubResolver{limit: 100, window: 20 * time.Minute}
+	detail := s.KeyDetail("u", time.Time{}, 0, resolver, now)
+	if detail == nil {
+		t.Fatal("detail nil")
+	}
+	if len(detail.RateLimits) != 1 {
+		t.Fatalf("rate_limits: want 1, got %d", len(detail.RateLimits))
+	}
+	rl := detail.RateLimits[0]
+	if rl.Used != 2 {
+		t.Fatalf("rl.Used: want 2, got %d", rl.Used)
+	}
+	if rl.Limit != 100 {
+		t.Fatalf("rl.Limit: want 100, got %d", rl.Limit)
+	}
+	// Earliest in window = t0+10min; resets_at = earliest + 20min = t0+30min.
+	wantResets := t0.Add(30*time.Minute).UnixMilli()
+	if rl.ResetsAt != wantResets {
+		t.Fatalf("rl.ResetsAt: want %d, got %d", wantResets, rl.ResetsAt)
+	}
+}
+
+func TestKeyDetail_LastActive(t *testing.T) {
+	s := seedStore(t)
+	detail := s.KeyDetail("huycyberk", time.Time{}, 0, nil, time.Now())
+	if detail == nil {
+		t.Fatal("huycyberk detail nil")
+	}
+	if len(detail.Models) != 1 {
+		t.Fatalf("models: want 1, got %d", len(detail.Models))
+	}
+	want := time.Date(2026, 5, 3, 14, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	if detail.Models[0].LastActive != want {
+		t.Fatalf("last_active: want %s, got %s", want, detail.Models[0].LastActive)
 	}
 }

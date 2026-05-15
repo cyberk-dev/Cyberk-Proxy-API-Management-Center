@@ -3,6 +3,7 @@ package usagestore
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 	"time"
 
@@ -27,15 +28,29 @@ type Detail struct {
 }
 
 type ModelData struct {
-	TotalRequests int64    `json:"total_requests"`
-	TotalTokens   int64    `json:"total_tokens"`
-	Details       []Detail `json:"details"`
+	TotalRequests   int64    `json:"total_requests"`
+	TotalTokens     int64    `json:"total_tokens"`
+	SuccessCount    int64    `json:"success_count"`
+	FailureCount    int64    `json:"failure_count"`
+	InputTokens     int64    `json:"input_tokens"`
+	OutputTokens    int64    `json:"output_tokens"`
+	CachedTokens    int64    `json:"cached_tokens"`
+	ReasoningTokens int64    `json:"reasoning_tokens"`
+	LastActiveMs    int64    `json:"last_active_ms,omitempty"`
+	Details         []Detail `json:"details"`
 }
 
 type APIData struct {
-	TotalRequests int64                `json:"total_requests"`
-	TotalTokens   int64                `json:"total_tokens"`
-	Models        map[string]*ModelData `json:"models"`
+	TotalRequests   int64                 `json:"total_requests"`
+	TotalTokens     int64                 `json:"total_tokens"`
+	SuccessCount    int64                 `json:"success_count"`
+	FailureCount    int64                 `json:"failure_count"`
+	InputTokens     int64                 `json:"input_tokens"`
+	OutputTokens    int64                 `json:"output_tokens"`
+	CachedTokens    int64                 `json:"cached_tokens"`
+	ReasoningTokens int64                 `json:"reasoning_tokens"`
+	LastActiveMs    int64                 `json:"last_active_ms,omitempty"`
+	Models          map[string]*ModelData `json:"models"`
 }
 
 type UsageSnapshot struct {
@@ -149,9 +164,33 @@ func (s *Store) HandleUsage(_ context.Context, record usage.Record) {
 	modelData.Details = append(modelData.Details, detail)
 	modelData.TotalRequests++
 	modelData.TotalTokens += totalTokens
+	modelData.InputTokens += detail.Tokens.InputTokens
+	modelData.OutputTokens += detail.Tokens.OutputTokens
+	modelData.CachedTokens += detail.Tokens.CachedTokens
+	modelData.ReasoningTokens += detail.Tokens.ReasoningTokens
+	if detail.Failed {
+		modelData.FailureCount++
+	} else {
+		modelData.SuccessCount++
+	}
+	if tsMs := ts.UnixMilli(); tsMs > modelData.LastActiveMs {
+		modelData.LastActiveMs = tsMs
+	}
 
 	apiData.TotalRequests++
 	apiData.TotalTokens += totalTokens
+	apiData.InputTokens += detail.Tokens.InputTokens
+	apiData.OutputTokens += detail.Tokens.OutputTokens
+	apiData.CachedTokens += detail.Tokens.CachedTokens
+	apiData.ReasoningTokens += detail.Tokens.ReasoningTokens
+	if detail.Failed {
+		apiData.FailureCount++
+	} else {
+		apiData.SuccessCount++
+	}
+	if modelData.LastActiveMs > apiData.LastActiveMs {
+		apiData.LastActiveMs = modelData.LastActiveMs
+	}
 
 	s.data.TotalRequests++
 	s.data.TotalTokens += totalTokens
@@ -235,7 +274,77 @@ func (s *Store) SummarySnapshot(since time.Time) *UsageSummarySnapshot {
 	return snap
 }
 
-func (s *Store) KeySnapshot(apiKey string) *UsageSnapshot {
+// RateLimitResolver mirrors (*ratelimit.Config).Resolve so the usagestore
+// package can compute the rate-limit panel without importing ratelimit
+// (which would create a cycle). The handler bridges to the real config store.
+type RateLimitResolver interface {
+	Resolve(apiKey, model string) (limit int, window time.Duration, applies bool)
+}
+
+type KeyDetailModelStats struct {
+	Model           string `json:"model"`
+	TotalRequests   int64  `json:"total_requests"`
+	SuccessCount    int64  `json:"success_count"`
+	FailureCount    int64  `json:"failure_count"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	TotalTokens     int64  `json:"total_tokens"`
+	LastActive      string `json:"last_active,omitempty"`
+}
+
+type KeyRateLimitWindow struct {
+	Model    string `json:"model"`
+	Window   string `json:"window"`
+	WindowMs int64  `json:"window_ms"`
+	Limit    int    `json:"limit"`
+	Used     int    `json:"used"`
+	ResetsAt int64  `json:"resets_at"`
+}
+
+type RecentDetailEntry struct {
+	Detail
+	Model string `json:"model"`
+}
+
+type KeyDetailResponse struct {
+	APIKey          string                `json:"api_key"`
+	TotalRequests   int64                 `json:"total_requests"`
+	SuccessCount    int64                 `json:"success_count"`
+	FailureCount    int64                 `json:"failure_count"`
+	InputTokens     int64                 `json:"input_tokens"`
+	OutputTokens    int64                 `json:"output_tokens"`
+	CachedTokens    int64                 `json:"cached_tokens"`
+	ReasoningTokens int64                 `json:"reasoning_tokens"`
+	TotalTokens     int64                 `json:"total_tokens"`
+	Models          []KeyDetailModelStats `json:"models"`
+	RecentDetails   []RecentDetailEntry   `json:"recent_details"`
+	RateLimits      []KeyRateLimitWindow  `json:"rate_limits"`
+}
+
+const (
+	defaultRecentDetailsLimit = 500
+	maxRecentDetailsLimit     = 5000
+)
+
+// KeyDetail returns a bounded snapshot of one API key's usage.
+//
+// When `since` is the zero value, aggregates are read directly from the
+// running counters (O(models)). Otherwise details are scanned once with the
+// `since` filter applied — JSON marshaling cost is still O(min(limit, N))
+// because RecentDetails is capped.
+//
+// `rl` may be nil; in that case RateLimits is empty. `now` is injected so
+// tests can pin the rate-limit window cutoff.
+func (s *Store) KeyDetail(apiKey string, since time.Time, limit int, rl RateLimitResolver, now time.Time) *KeyDetailResponse {
+	if limit <= 0 {
+		limit = defaultRecentDetailsLimit
+	}
+	if limit > maxRecentDetailsLimit {
+		limit = maxRecentDetailsLimit
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -244,41 +353,151 @@ func (s *Store) KeySnapshot(apiKey string) *UsageSnapshot {
 		return nil
 	}
 
-	cpModels := make(map[string]*ModelData, len(apiData.Models))
+	resp := &KeyDetailResponse{
+		APIKey:        apiKey,
+		Models:        make([]KeyDetailModelStats, 0, len(apiData.Models)),
+		RecentDetails: []RecentDetailEntry{},
+		RateLimits:    []KeyRateLimitWindow{},
+	}
+
+	filterTime := !since.IsZero()
+	sinceMs := int64(0)
+	if filterTime {
+		sinceMs = since.UnixMilli()
+	}
+
+	// Collect candidate recent details from every model. We always touch every
+	// detail when filtering by time; when not filtering we can shortcut by
+	// taking the tail of each model's already-time-ordered slice.
+	type candidate struct {
+		entry RecentDetailEntry
+		tsMs  int64
+	}
+	candidates := make([]candidate, 0, limit*2)
+
 	for modelName, modelData := range apiData.Models {
-		details := make([]Detail, len(modelData.Details))
-		copy(details, modelData.Details)
-		cpModels[modelName] = &ModelData{
-			TotalRequests: modelData.TotalRequests,
-			TotalTokens:   modelData.TotalTokens,
-			Details:       details,
+		ms := KeyDetailModelStats{Model: modelName}
+		var lastActiveMs int64
+
+		if filterTime {
+			for _, d := range modelData.Details {
+				tsMs := parseTimestampMs(d.Timestamp)
+				if tsMs < sinceMs {
+					continue
+				}
+				ms.TotalRequests++
+				ms.TotalTokens += d.Tokens.TotalTokens
+				ms.InputTokens += d.Tokens.InputTokens
+				ms.OutputTokens += d.Tokens.OutputTokens
+				ms.CachedTokens += d.Tokens.CachedTokens
+				ms.ReasoningTokens += d.Tokens.ReasoningTokens
+				if d.Failed {
+					ms.FailureCount++
+				} else {
+					ms.SuccessCount++
+				}
+				if tsMs > lastActiveMs {
+					lastActiveMs = tsMs
+				}
+				candidates = append(candidates, candidate{
+					entry: RecentDetailEntry{Detail: d, Model: modelName},
+					tsMs:  tsMs,
+				})
+			}
+		} else {
+			ms.TotalRequests = modelData.TotalRequests
+			ms.TotalTokens = modelData.TotalTokens
+			ms.InputTokens = modelData.InputTokens
+			ms.OutputTokens = modelData.OutputTokens
+			ms.CachedTokens = modelData.CachedTokens
+			ms.ReasoningTokens = modelData.ReasoningTokens
+			ms.SuccessCount = modelData.SuccessCount
+			ms.FailureCount = modelData.FailureCount
+			lastActiveMs = modelData.LastActiveMs
+
+			// Take the tail of this model's details (they are appended in time
+			// order). Cross-model merging happens after the loop.
+			start := len(modelData.Details) - limit
+			if start < 0 {
+				start = 0
+			}
+			for _, d := range modelData.Details[start:] {
+				tsMs := parseTimestampMs(d.Timestamp)
+				candidates = append(candidates, candidate{
+					entry: RecentDetailEntry{Detail: d, Model: modelName},
+					tsMs:  tsMs,
+				})
+			}
 		}
-	}
 
-	cpAPI := &APIData{
-		TotalRequests: apiData.TotalRequests,
-		TotalTokens:   apiData.TotalTokens,
-		Models:        cpModels,
-	}
+		if ms.TotalRequests == 0 {
+			continue
+		}
+		if lastActiveMs > 0 {
+			ms.LastActive = time.UnixMilli(lastActiveMs).UTC().Format(time.RFC3339Nano)
+		}
 
-	var successCount, failureCount int64
-	for _, md := range cpModels {
-		for _, d := range md.Details {
-			if d.Failed {
-				failureCount++
-			} else {
-				successCount++
+		resp.Models = append(resp.Models, ms)
+		resp.TotalRequests += ms.TotalRequests
+		resp.TotalTokens += ms.TotalTokens
+		resp.InputTokens += ms.InputTokens
+		resp.OutputTokens += ms.OutputTokens
+		resp.CachedTokens += ms.CachedTokens
+		resp.ReasoningTokens += ms.ReasoningTokens
+		resp.SuccessCount += ms.SuccessCount
+		resp.FailureCount += ms.FailureCount
+
+		// Rate-limit panel: per-model count within the configured window.
+		if rl != nil {
+			if rlLimit, window, applies := rl.Resolve(apiKey, modelName); applies && rlLimit > 0 && window > 0 {
+				cutoffMs := now.UnixMilli() - window.Milliseconds()
+				used := 0
+				earliestMs := int64(0)
+				for _, d := range modelData.Details {
+					tsMs := parseTimestampMs(d.Timestamp)
+					if tsMs < cutoffMs {
+						continue
+					}
+					used++
+					if earliestMs == 0 || tsMs < earliestMs {
+						earliestMs = tsMs
+					}
+				}
+				if used > 0 {
+					resp.RateLimits = append(resp.RateLimits, KeyRateLimitWindow{
+						Model:    modelName,
+						Window:   window.String(),
+						WindowMs: window.Milliseconds(),
+						Limit:    rlLimit,
+						Used:     used,
+						ResetsAt: earliestMs + window.Milliseconds(),
+					})
+				}
 			}
 		}
 	}
 
-	return &UsageSnapshot{
-		TotalRequests: apiData.TotalRequests,
-		SuccessCount:  successCount,
-		FailureCount:  failureCount,
-		TotalTokens:   apiData.TotalTokens,
-		APIs:          map[string]*APIData{apiKey: cpAPI},
+	// Sort models by TotalRequests desc, tie-break by name asc.
+	sort.Slice(resp.Models, func(i, j int) bool {
+		if resp.Models[i].TotalRequests != resp.Models[j].TotalRequests {
+			return resp.Models[i].TotalRequests > resp.Models[j].TotalRequests
+		}
+		return resp.Models[i].Model < resp.Models[j].Model
+	})
+
+	// Sort candidates by timestamp desc and cap at `limit`.
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].tsMs > candidates[j].tsMs })
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
 	}
+	resp.RecentDetails = make([]RecentDetailEntry, len(candidates))
+	for i, c := range candidates {
+		resp.RecentDetails[i] = c.entry
+	}
+
+	sort.Slice(resp.RateLimits, func(i, j int) bool { return resp.RateLimits[i].Model < resp.RateLimits[j].Model })
+
+	return resp
 }
 
 func (s *Store) Export() *ExportPayload {
@@ -429,24 +648,79 @@ func (s *Store) importOldFormat(payload []byte) (int, error) {
 	return added, nil
 }
 
+// recalcTotalsLocked rebuilds every running counter from the raw Details slices.
+// It is the source of truth after Import: callers may append details without
+// touching the aggregates (e.g. the old export format never had them) and rely
+// on this pass to make the store consistent.
 func (s *Store) recalcTotalsLocked() {
 	s.data.TotalRequests = 0
 	s.data.SuccessCount = 0
 	s.data.FailureCount = 0
 	s.data.TotalTokens = 0
 	for _, apiData := range s.data.APIs {
-		s.data.TotalRequests += apiData.TotalRequests
-		s.data.TotalTokens += apiData.TotalTokens
+		apiData.TotalRequests = 0
+		apiData.TotalTokens = 0
+		apiData.SuccessCount = 0
+		apiData.FailureCount = 0
+		apiData.InputTokens = 0
+		apiData.OutputTokens = 0
+		apiData.CachedTokens = 0
+		apiData.ReasoningTokens = 0
+		apiData.LastActiveMs = 0
 		for _, modelData := range apiData.Models {
+			modelData.TotalRequests = 0
+			modelData.TotalTokens = 0
+			modelData.SuccessCount = 0
+			modelData.FailureCount = 0
+			modelData.InputTokens = 0
+			modelData.OutputTokens = 0
+			modelData.CachedTokens = 0
+			modelData.ReasoningTokens = 0
+			modelData.LastActiveMs = 0
 			for _, d := range modelData.Details {
+				modelData.TotalRequests++
+				modelData.TotalTokens += d.Tokens.TotalTokens
+				modelData.InputTokens += d.Tokens.InputTokens
+				modelData.OutputTokens += d.Tokens.OutputTokens
+				modelData.CachedTokens += d.Tokens.CachedTokens
+				modelData.ReasoningTokens += d.Tokens.ReasoningTokens
 				if d.Failed {
-					s.data.FailureCount++
+					modelData.FailureCount++
 				} else {
-					s.data.SuccessCount++
+					modelData.SuccessCount++
+				}
+				if tsMs := parseTimestampMs(d.Timestamp); tsMs > modelData.LastActiveMs {
+					modelData.LastActiveMs = tsMs
 				}
 			}
+			apiData.TotalRequests += modelData.TotalRequests
+			apiData.TotalTokens += modelData.TotalTokens
+			apiData.SuccessCount += modelData.SuccessCount
+			apiData.FailureCount += modelData.FailureCount
+			apiData.InputTokens += modelData.InputTokens
+			apiData.OutputTokens += modelData.OutputTokens
+			apiData.CachedTokens += modelData.CachedTokens
+			apiData.ReasoningTokens += modelData.ReasoningTokens
+			if modelData.LastActiveMs > apiData.LastActiveMs {
+				apiData.LastActiveMs = modelData.LastActiveMs
+			}
 		}
+		s.data.TotalRequests += apiData.TotalRequests
+		s.data.TotalTokens += apiData.TotalTokens
+		s.data.SuccessCount += apiData.SuccessCount
+		s.data.FailureCount += apiData.FailureCount
 	}
+}
+
+func parseTimestampMs(ts string) int64 {
+	if ts == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return 0
+	}
+	return t.UnixMilli()
 }
 
 func trimBOM(b []byte) []byte {

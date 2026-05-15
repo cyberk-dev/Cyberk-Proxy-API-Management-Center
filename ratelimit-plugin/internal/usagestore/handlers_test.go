@@ -19,10 +19,14 @@ func init() {
 }
 
 func setupTestRouter(secretKey string, store *Store) *gin.Engine {
+	return setupTestRouterWithResolver(secretKey, store, nil)
+}
+
+func setupTestRouterWithResolver(secretKey string, store *Store, rl RateLimitResolver) *gin.Engine {
 	engine := gin.New()
 	cfg := &config.Config{}
 	cfg.RemoteManagement.SecretKey = secretKey
-	RegisterRoutes(engine, cfg, store)
+	RegisterRoutes(engine, cfg, store, rl)
 	return engine
 }
 
@@ -152,22 +156,86 @@ func TestKeysEndpoint_Existing(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var snap UsageSnapshot
-	if err := json.Unmarshal(w.Body.Bytes(), &snap); err != nil {
+	var detail KeyDetailResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if snap.TotalRequests != 2 {
-		t.Fatalf("anderson requests: want 2, got %d", snap.TotalRequests)
+	if detail.APIKey != "anderson" {
+		t.Fatalf("api_key: want anderson, got %q", detail.APIKey)
 	}
-	if len(snap.APIs) != 1 {
-		t.Fatalf("api count: want 1, got %d", len(snap.APIs))
+	if detail.TotalRequests != 2 {
+		t.Fatalf("total_requests: want 2, got %d", detail.TotalRequests)
 	}
-	gpt := snap.APIs["anderson"].Models["gpt-5.4"]
-	if gpt == nil {
-		t.Fatal("gpt-5.4 missing")
+	if len(detail.Models) != 1 {
+		t.Fatalf("models: want 1, got %d", len(detail.Models))
 	}
-	if len(gpt.Details) != 2 {
-		t.Fatalf("gpt details: want 2, got %d", len(gpt.Details))
+	if detail.Models[0].Model != "gpt-5.4" {
+		t.Fatalf("models[0]: want gpt-5.4, got %s", detail.Models[0].Model)
+	}
+	if len(detail.RecentDetails) != 2 {
+		t.Fatalf("recent_details: want 2, got %d", len(detail.RecentDetails))
+	}
+	// Each recent_details entry must carry the model tag.
+	for _, d := range detail.RecentDetails {
+		if d.Model != "gpt-5.4" {
+			t.Fatalf("recent_details model tag: want gpt-5.4, got %q", d.Model)
+		}
+	}
+}
+
+func TestKeysEndpoint_QueryParams(t *testing.T) {
+	store := seedTestStore(t)
+	router := setupTestRouter("secret", store)
+
+	// since = May 5 → only the May 10 record for anderson passes.
+	sinceMs := time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC).UnixMilli()
+	w := doGet(t, router, "/v0/management/usage/keys/anderson?since="+strconv.FormatInt(sinceMs, 10)+"&limit=10", "secret")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	var detail KeyDetailResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if detail.TotalRequests != 1 {
+		t.Fatalf("filtered total_requests: want 1, got %d", detail.TotalRequests)
+	}
+	if len(detail.RecentDetails) != 1 {
+		t.Fatalf("filtered recent_details: want 1, got %d", len(detail.RecentDetails))
+	}
+}
+
+type handlerStubResolver struct {
+	limit  int
+	window time.Duration
+}
+
+func (s handlerStubResolver) Resolve(_, _ string) (int, time.Duration, bool) {
+	return s.limit, s.window, s.limit > 0 && s.window > 0
+}
+
+func TestKeysEndpoint_WithRateLimitResolver(t *testing.T) {
+	store := seedTestStore(t)
+	resolver := handlerStubResolver{limit: 50, window: 90 * 24 * time.Hour} // 90 days covers seeded data
+	router := setupTestRouterWithResolver("secret", store, resolver)
+
+	w := doGet(t, router, "/v0/management/usage/keys/anderson", "secret")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var detail KeyDetailResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(detail.RateLimits) != 1 {
+		t.Fatalf("rate_limits: want 1, got %d", len(detail.RateLimits))
+	}
+	rl := detail.RateLimits[0]
+	if rl.Limit != 50 {
+		t.Fatalf("rl.Limit: want 50, got %d", rl.Limit)
+	}
+	if rl.Used != 2 {
+		t.Fatalf("rl.Used: want 2 (both anderson records in window), got %d", rl.Used)
 	}
 }
 

@@ -16,10 +16,69 @@ export interface UsagePayload {
   [key: string]: unknown;
 }
 
+export interface KeyDetailModelStats {
+  model: string;
+  total_requests: number;
+  success_count: number;
+  failure_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  last_active?: string;
+}
+
+export interface KeyRateLimitWindow {
+  model: string;
+  window: string;
+  window_ms: number;
+  limit: number;
+  used: number;
+  resets_at: number;
+}
+
+export interface KeyRecentDetail {
+  timestamp: string;
+  latency_ms?: number;
+  source?: string;
+  auth_index?: string;
+  tokens: {
+    input_tokens?: number;
+    output_tokens?: number;
+    reasoning_tokens?: number;
+    cached_tokens?: number;
+    cache_tokens?: number;
+    total_tokens?: number;
+  };
+  failed: boolean;
+  model: string;
+}
+
+export interface KeyDetailPayload {
+  api_key: string;
+  total_requests: number;
+  success_count: number;
+  failure_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  models: KeyDetailModelStats[];
+  recent_details: KeyRecentDetail[];
+  rate_limits: KeyRateLimitWindow[];
+}
+
+export interface LoadKeyUsageOptions {
+  sinceMs?: number;
+  limit?: number;
+}
+
 export interface UseUsageDataReturn {
   usage: UsagePayload | null;
   summary: UsagePayload | null;
-  keyUsage: UsagePayload | null;
+  keyUsage: KeyDetailPayload | null;
   loading: boolean;
   error: string;
   lastRefreshedAt: Date | null;
@@ -27,7 +86,7 @@ export interface UseUsageDataReturn {
   setModelPrices: (prices: Record<string, ModelPrice>) => void;
   loadUsage: () => Promise<void>;
   loadSummary: (sinceMs?: number) => Promise<void>;
-  loadKeyUsage: (apiKey: string) => Promise<void>;
+  loadKeyUsage: (apiKey: string, opts?: LoadKeyUsageOptions) => Promise<void>;
   handleExport: () => Promise<void>;
   handleImport: () => void;
   handleImportChange: (event: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
@@ -75,7 +134,7 @@ export function useUsageData(): UseUsageDataReturn {
 
   const [usage, setUsage] = useState<UsagePayload | null>(null);
   const [summary, setSummary] = useState<UsagePayload | null>(null);
-  const [keyUsage, setKeyUsage] = useState<UsagePayload | null>(null);
+  const [keyUsage, setKeyUsage] = useState<KeyDetailPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
@@ -115,15 +174,19 @@ export function useUsageData(): UseUsageDataReturn {
     }
   }, []);
 
-  const loadKeyUsage = useCallback(async (apiKey: string) => {
+  const loadKeyUsage = useCallback(async (apiKey: string, opts?: LoadKeyUsageOptions) => {
     setLoading(true);
     setError('');
     try {
-      const data = await apiClient.get<Record<string, unknown>>(
-        `/usage/keys/${encodeURIComponent(apiKey)}`,
-        { timeout: USAGE_TIMEOUT_MS }
-      );
-      setKeyUsage(data as UsagePayload);
+      const params = new URLSearchParams();
+      if (opts?.sinceMs && opts.sinceMs > 0) params.set('since', String(opts.sinceMs));
+      if (opts?.limit && opts.limit > 0) params.set('limit', String(opts.limit));
+      const qs = params.toString();
+      const url = qs
+        ? `/usage/keys/${encodeURIComponent(apiKey)}?${qs}`
+        : `/usage/keys/${encodeURIComponent(apiKey)}`;
+      const data = await apiClient.get<KeyDetailPayload>(url, { timeout: USAGE_TIMEOUT_MS });
+      setKeyUsage(data);
       setLastRefreshedAt(new Date());
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';

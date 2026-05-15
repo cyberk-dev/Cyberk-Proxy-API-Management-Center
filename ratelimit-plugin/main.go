@@ -189,7 +189,7 @@ func main() {
 			),
 			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, c *config.Config) {
 				usagepush.Register(engine, c)
-				usagestore.RegisterRoutes(engine, c, ustore)
+				usagestore.RegisterRoutes(engine, c, ustore, rlBridge{store})
 				promptlog.RegisterReadHandlers(engine, c, plogCfg, plogTemplates)
 			}),
 		)
@@ -295,4 +295,22 @@ func maxWindowOf(cfg *ratelimit.Config) time.Duration {
 		return 24 * time.Hour
 	}
 	return max
+}
+
+// rlBridge adapts the hot-reloadable *ratelimit.ConfigStore to the
+// usagestore.RateLimitResolver interface so the user-detail endpoint can
+// report rate-limit panel data without importing the ratelimit package.
+type rlBridge struct {
+	store *ratelimit.ConfigStore
+}
+
+func (b rlBridge) Resolve(apiKey, model string) (int, time.Duration, bool) {
+	if b.store == nil {
+		return 0, 0, false
+	}
+	cfg := b.store.Get()
+	if cfg == nil {
+		return 0, 0, false
+	}
+	return cfg.Resolve(apiKey, model)
 }

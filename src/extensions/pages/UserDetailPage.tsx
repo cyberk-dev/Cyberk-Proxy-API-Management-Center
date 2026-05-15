@@ -1,41 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useUsageData } from '../hooks/useUsageData';
+import { useUsageData, type KeyDetailModelStats } from '../hooks/useUsageData';
 import { IconCheck, IconRefreshCw, IconX } from '@/components/ui/icons';
-import {
-  collectUsageDetails,
-  filterUsageByTimeRange,
-  type ModelPrice,
-  type UsageDetail,
-  type UsageTimeRange
-} from '../utils/usageCompat';
+import type { ModelPrice, UsageTimeRange } from '../utils/usageCompat';
 import { getNewInputTokens } from '../utils/tokenSemantics';
 import { maskApiKey } from '@/utils/format';
 import { resolveDefaultModelPrice } from '@/data/defaultModelPrices';
 import { useConfigStore, useNotificationStore } from '@/stores';
-import { configFileApi } from '@/services/api';
 import { useKeyAliases } from '../hooks/useKeyAliases';
-import {
-  pivotByKey,
-  successRate,
-  makeCostFn,
-  type PerKeyStats
-} from '../utils/keyPivot';
+import { makeCostFn } from '../utils/keyPivot';
 import { resolveKeyByIndex } from '../utils/keyIndex';
-import {
-  formatNumber,
-  formatCost,
-  formatLastActive
-} from '../utils/keyDisplay';
-import {
-  parseRateLimitFromYaml,
-  resolveRateLimit,
-  type RateLimitConfig
-} from '../services/ratelimitConfig';
+import { formatNumber, formatCost, formatLastActive } from '../utils/keyDisplay';
 import styles from './UserDetailPage.module.scss';
 
-const LOG_CAP = 500;
+const LOG_LIMIT = 500;
+
+const RANGE_TO_MS: Record<Exclude<UsageTimeRange, 'all'>, number> = {
+  '7h': 7 * 60 * 60 * 1000,
+  '24h': 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000
+};
 
 function IconPencil({ size = 14 }: { size?: number }) {
   return (
@@ -70,6 +55,22 @@ function parseRange(raw: string | null): UsageTimeRange {
   return raw && RANGE_VALUES.has(raw) ? (raw as UsageTimeRange) : DEFAULT_RANGE;
 }
 
+function sinceMsFor(range: UsageTimeRange, nowMs: number = Date.now()): number | undefined {
+  if (range === 'all') return undefined;
+  const span = RANGE_TO_MS[range];
+  return span ? nowMs - span : undefined;
+}
+
+// OpenAI-family models report `input_tokens` as including the cached slice; we
+// display the new-prompt portion to match the per-detail logic used elsewhere
+// (see tokenSemantics.ts). Server returns raw aggregates so we normalize here.
+function newInputFromModel(stats: KeyDetailModelStats): number {
+  return getNewInputTokens(
+    { input_tokens: stats.input_tokens, cached_tokens: stats.cached_tokens },
+    stats.model
+  );
+}
+
 export function UserDetailPage() {
   const { t } = useTranslation('extensions');
   const navigate = useNavigate();
@@ -89,10 +90,6 @@ export function UserDetailPage() {
     [index, knownKeys, summary]
   );
   const indexResolved = decodedKey !== '';
-
-  useEffect(() => {
-    if (decodedKey) void loadKeyUsage(decodedKey);
-  }, [decodedKey, loadKeyUsage]);
 
   const [searchParams, setSearchParams] = useSearchParams();
   const range = parseRange(searchParams.get(RANGE_QUERY_KEY));
@@ -114,22 +111,10 @@ export function UserDetailPage() {
     [setSearchParams]
   );
 
-  const [rlConfig, setRlConfig] = useState<RateLimitConfig | null>(null);
-
   useEffect(() => {
-    let cancelled = false;
-    configFileApi
-      .fetchConfigYaml()
-      .then((raw) => {
-        if (!cancelled) setRlConfig(parseRateLimitFromYaml(raw));
-      })
-      .catch(() => {
-        if (!cancelled) setRlConfig({ default: null, models: {}, keyOverrides: {} });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (!decodedKey) return;
+    void loadKeyUsage(decodedKey, { sinceMs: sinceMsFor(range), limit: LOG_LIMIT });
+  }, [decodedKey, range, loadKeyUsage]);
 
   const isOrphan =
     indexResolved && knownKeys.length > 0 && !knownKeys.includes(decodedKey);
@@ -147,53 +132,66 @@ export function UserDetailPage() {
     }
   }, [editingAlias]);
 
-
-  const singleUsage = keyUsage;
-
-  // Whether the decoded key has any data in the raw usage export (ignoring the
-  // current time-range filter). Used to decide between "truly not found" and
-  // "found, but current range is empty" so we can still show the range picker
-  // in the latter case.
-  const keyHasAnyUsage = useMemo(() => {
-    if (!decodedKey) return false;
-    if (!singleUsage || typeof singleUsage !== 'object') return false;
-    const apis = (singleUsage as { apis?: unknown }).apis;
-    if (!apis || typeof apis !== 'object' || Array.isArray(apis)) return false;
-    return Object.prototype.hasOwnProperty.call(apis, decodedKey);
-  }, [singleUsage, decodedKey]);
-
-  const filteredUsage = useMemo(
-    () => filterUsageByTimeRange(singleUsage, range),
-    [singleUsage, range]
-  );
+  const keyMatchesPayload = !!keyUsage && keyUsage.api_key === decodedKey;
 
   // User-configured prices take precedence; fall back to bundled defaults so
   // unpriced-but-known models still produce a cost instead of $0.
   const effectiveModelPrices = useMemo(() => {
     const merged: Record<string, ModelPrice> = { ...modelPrices };
-    for (const d of collectUsageDetails(singleUsage)) {
-      const name = d.__modelName;
-      if (!name || merged[name]) continue;
-      const def = resolveDefaultModelPrice(name);
-      if (def) merged[name] = def;
+    if (keyMatchesPayload) {
+      for (const m of keyUsage!.models) {
+        if (merged[m.model]) continue;
+        const def = resolveDefaultModelPrice(m.model);
+        if (def) merged[m.model] = def;
+      }
     }
     return merged;
-  }, [modelPrices, singleUsage]);
+  }, [modelPrices, keyMatchesPayload, keyUsage]);
 
   const costFn = useMemo(() => makeCostFn(effectiveModelPrices), [effectiveModelPrices]);
 
-  const keyStats = useMemo<PerKeyStats | null>(() => {
-    const all = pivotByKey(filteredUsage, knownKeys, aliases, costFn);
-    return all.find((r) => r.apiKey === decodedKey) ?? null;
-  }, [filteredUsage, knownKeys, aliases, costFn, decodedKey]);
+  // Per-model cost via the shared cost formula. Sum-then-clamp differs from
+  // per-detail-then-sum only when a single detail had cached > input — a corner
+  // case in practice; aggregating here keeps the math identical to the table.
+  const perModelWithCost = useMemo(() => {
+    if (!keyMatchesPayload) return [] as Array<KeyDetailModelStats & { cost: number; newInput: number }>;
+    return keyUsage!.models.map((m) => ({
+      ...m,
+      newInput: newInputFromModel(m),
+      cost: costFn(m.model, {
+        input_tokens: m.input_tokens,
+        output_tokens: m.output_tokens,
+        cached_tokens: m.cached_tokens,
+        reasoning_tokens: m.reasoning_tokens,
+        total_tokens: m.total_tokens
+      })
+    }));
+  }, [keyMatchesPayload, keyUsage, costFn]);
 
-  const logEntries = useMemo<UsageDetail[]>(() => {
-    const all = collectUsageDetails(filteredUsage);
-    all.sort((a, b) => (b.__timestampMs ?? 0) - (a.__timestampMs ?? 0));
-    return all;
-  }, [filteredUsage]);
+  const totalCost = useMemo(
+    () => perModelWithCost.reduce((sum, m) => sum + m.cost, 0),
+    [perModelWithCost]
+  );
 
-  const logVisible = useMemo(() => logEntries.slice(0, LOG_CAP), [logEntries]);
+  const topStats = useMemo(() => {
+    if (!keyMatchesPayload) return null;
+    const u = keyUsage!;
+    // Sum normalized "new" input tokens across models so the subtext matches
+    // the per-model table column.
+    const newInputTotal = perModelWithCost.reduce((sum, m) => sum + m.newInput, 0);
+    const successRatePct = u.total_requests > 0
+      ? (u.success_count / u.total_requests) * 100
+      : 0;
+    return {
+      totalRequests: u.total_requests,
+      failureCount: u.failure_count,
+      successRatePct,
+      totalTokens: u.total_tokens,
+      newInputTotal,
+      outputTokens: u.output_tokens,
+      cachedTokens: u.cached_tokens
+    };
+  }, [keyMatchesPayload, keyUsage, perModelWithCost]);
 
   const maskedKey = useMemo(() => maskApiKey(decodedKey), [decodedKey]);
 
@@ -241,65 +239,17 @@ export function UserDetailPage() {
     }
   };
 
-  const sr = keyStats ? successRate(keyStats) : 0;
-
-  // Rate-limit panel: compute approx usage per matched model.
-  type RlRow = {
-    model: string;
-    window: string;
-    limit: number;
-    windowMs: number;
-    used: number;
-    resetsAt: number;
+  const refresh = () => {
+    if (decodedKey) {
+      void loadKeyUsage(decodedKey, { sinceMs: sinceMsFor(range), limit: LOG_LIMIT });
+    }
   };
-  const rlRows = useMemo<RlRow[]>(() => {
-    if (!rlConfig) return [];
-    const nowMs = Date.now();
-    const out: RlRow[] = [];
-    // Use unfiltered singleUsage so models touched outside the detail-page time
-    // range still show up in the limit panel (plugin window may be > filter).
-    const allDetails = collectUsageDetails(singleUsage);
-    const modelsTouched = new Set<string>();
-    for (const d of allDetails) {
-      if (d.__modelName) modelsTouched.add(d.__modelName);
-    }
-    for (const model of modelsTouched) {
-      const rule = resolveRateLimit(rlConfig, decodedKey, model);
-      if (!rule || rule.requests <= 0) continue;
-      const windowMs = rule.windowMs;
-      if (!windowMs) continue;
-      const cutoff = nowMs - windowMs;
-      let used = 0;
-      let earliest = nowMs;
-      for (const d of allDetails) {
-        if (d.__modelName !== model) continue;
-        const ts = d.__timestampMs ?? 0;
-        if (ts >= cutoff) {
-          used += 1;
-          if (ts < earliest) earliest = ts;
-        }
-      }
-      if (used <= 0) continue;
-      out.push({
-        model,
-        window: rule.window || '—',
-        limit: rule.requests,
-        windowMs,
-        used,
-        resetsAt: earliest + windowMs
-      });
-    }
-    out.sort((a, b) => a.model.localeCompare(b.model));
-    return out;
-  }, [rlConfig, singleUsage, decodedKey]);
 
-  const rlEnabled = rlConfig !== null && (rlConfig.default || Object.keys(rlConfig.models).length > 0);
-
-  // Only bail when the key itself cannot be found in the usage export. If the
-  // key exists but the selected time range filters out everything, fall
-  // through so the page still renders with the range picker (otherwise the
-  // user gets stuck on a blank "not found" screen and can't switch ranges).
-  if (!usageLoading && !keyHasAnyUsage) {
+  // Bail to "not found" only when the fetch resolved with no matching data —
+  // either the server returned 404 (keyUsage stays null) or it returned data
+  // for a different key. Short-range queries where the key exists but has no
+  // events in the window fall through so the range picker stays visible.
+  if (!usageLoading && indexResolved && !keyMatchesPayload) {
     return (
       <div className={styles.container}>
         <button className={styles.backLink} onClick={() => navigate('/custom/users')}>
@@ -389,7 +339,7 @@ export function UserDetailPage() {
             <button
               type="button"
               className={styles.iconBtn}
-              onClick={() => { if (decodedKey) void loadKeyUsage(decodedKey); }}
+              onClick={refresh}
               disabled={usageLoading}
               aria-label={t('users.refresh')}
               title={t('users.refresh')}
@@ -421,33 +371,33 @@ export function UserDetailPage() {
         <div className={styles.statCard}>
           <span className={styles.statLabel}>{t('detail.total_requests')}</span>
           <span className={styles.statValue}>
-            {formatNumber(keyStats?.totalRequests ?? 0)}
+            {formatNumber(topStats?.totalRequests ?? 0)}
           </span>
           <span className={styles.statMuted}>
-            {keyStats ? `${formatNumber(keyStats.failureCount)} failed` : ''}
+            {topStats ? `${formatNumber(topStats.failureCount)} failed` : ''}
           </span>
         </div>
         <div className={styles.statCard}>
           <span className={styles.statLabel}>{t('detail.success_rate')}</span>
           <span className={styles.statValue}>
-            {keyStats && keyStats.totalRequests > 0 ? `${sr.toFixed(1)}%` : '—'}
+            {topStats && topStats.totalRequests > 0 ? `${topStats.successRatePct.toFixed(1)}%` : '—'}
           </span>
         </div>
         <div className={styles.statCard}>
           <span className={styles.statLabel}>{t('detail.total_tokens')}</span>
           <span className={styles.statValue}>
-            {formatNumber(keyStats?.totalTokens ?? 0)}
+            {formatNumber(topStats?.totalTokens ?? 0)}
           </span>
           <span className={styles.statMuted}>
-            {keyStats
-              ? `${formatNumber(keyStats.inputTokens)} ${t('detail.tokens_in')} / ${formatNumber(keyStats.outputTokens)} ${t('detail.tokens_out')} / ${formatNumber(keyStats.cachedTokens)} ${t('detail.tokens_cached')}`
+            {topStats
+              ? `${formatNumber(topStats.newInputTotal)} ${t('detail.tokens_in')} / ${formatNumber(topStats.outputTokens)} ${t('detail.tokens_out')} / ${formatNumber(topStats.cachedTokens)} ${t('detail.tokens_cached')}`
               : ''}
           </span>
         </div>
         <div className={styles.statCard}>
           <span className={styles.statLabel}>{t('detail.total_cost')}</span>
           <span className={styles.statValue}>
-            {formatCost(keyStats?.totalCost ?? 0)}
+            {formatCost(totalCost)}
           </span>
         </div>
       </div>
@@ -469,17 +419,17 @@ export function UserDetailPage() {
             </tr>
           </thead>
           <tbody>
-            {(keyStats?.perModel ?? []).map((m) => (
+            {perModelWithCost.map((m) => (
               <tr key={m.model}>
                 <td className={styles.mono}>{m.model}</td>
-                <td className={styles.numeric}>{formatNumber(m.requests)}</td>
-                <td className={styles.numeric}>{formatNumber(m.inputTokens)}</td>
-                <td className={styles.numeric}>{formatNumber(m.outputTokens)}</td>
-                <td className={styles.numeric}>{formatNumber(m.cachedTokens)}</td>
+                <td className={styles.numeric}>{formatNumber(m.total_requests)}</td>
+                <td className={styles.numeric}>{formatNumber(m.newInput)}</td>
+                <td className={styles.numeric}>{formatNumber(m.output_tokens)}</td>
+                <td className={styles.numeric}>{formatNumber(m.cached_tokens)}</td>
                 <td className={styles.numeric}>{formatCost(m.cost)}</td>
               </tr>
             ))}
-            {(!keyStats || keyStats.perModel.length === 0) && (
+            {perModelWithCost.length === 0 && (
               <tr>
                 <td colSpan={6} className={styles.emptyState}>
                   {t('users.empty')}
@@ -496,13 +446,10 @@ export function UserDetailPage() {
           <h2 className={styles.sectionTitle}>{t('detail.ratelimit_panel')}</h2>
         </div>
         <div className={styles.sectionNote}>{t('detail.ratelimit_note')}</div>
-        {!rlEnabled && (
-          <div className={styles.emptyState}>{t('detail.ratelimit_disabled')}</div>
-        )}
-        {rlEnabled && rlRows.length === 0 && (
+        {keyMatchesPayload && keyUsage!.rate_limits.length === 0 && (
           <div className={styles.emptyState}>{t('detail.ratelimit_no_match')}</div>
         )}
-        {rlEnabled && rlRows.length > 0 && (
+        {keyMatchesPayload && keyUsage!.rate_limits.length > 0 && (
           <table className={styles.table}>
             <thead>
               <tr>
@@ -514,7 +461,7 @@ export function UserDetailPage() {
               </tr>
             </thead>
             <tbody>
-              {rlRows.map((r) => (
+              {keyUsage!.rate_limits.map((r) => (
                 <tr key={r.model}>
                   <td className={styles.mono}>{r.model}</td>
                   <td>{r.window}</td>
@@ -523,7 +470,7 @@ export function UserDetailPage() {
                     ≈ {formatNumber(r.used)} / {formatNumber(r.limit)}
                   </td>
                   <td>
-                    {r.resetsAt > 0 ? formatLastActive(r.resetsAt) : '—'}
+                    {r.resets_at > 0 ? formatLastActive(r.resets_at) : '—'}
                   </td>
                 </tr>
               ))}
@@ -550,16 +497,16 @@ export function UserDetailPage() {
               </tr>
             </thead>
             <tbody>
-              {logVisible.map((d, idx) => {
+              {keyMatchesPayload && keyUsage!.recent_details.map((d, idx) => {
                 const cached = Math.max(
                   d.tokens?.cached_tokens ?? 0,
                   d.tokens?.cache_tokens ?? 0
                 );
-                const newInput = getNewInputTokens(d.tokens, d.__modelName);
+                const newInput = getNewInputTokens(d.tokens, d.model);
                 return (
                   <tr key={`${d.timestamp}-${idx}`}>
                     <td>{new Date(d.timestamp).toLocaleString()}</td>
-                    <td className={styles.mono}>{d.__modelName ?? '—'}</td>
+                    <td className={styles.mono}>{d.model || '—'}</td>
                     <td className={styles.numeric}>
                       {formatNumber(newInput)}
                     </td>
@@ -575,7 +522,7 @@ export function UserDetailPage() {
                   </tr>
                 );
               })}
-              {logVisible.length === 0 && (
+              {(!keyMatchesPayload || keyUsage!.recent_details.length === 0) && (
                 <tr>
                   <td colSpan={6} className={styles.emptyState}>
                     {t('users.empty')}
@@ -585,11 +532,11 @@ export function UserDetailPage() {
             </tbody>
           </table>
         </div>
-        {logEntries.length > 0 && (
+        {keyMatchesPayload && keyUsage!.recent_details.length > 0 && (
           <div className={styles.logFooter}>
             {t('detail.log_showing', {
-              shown: logVisible.length,
-              total: logEntries.length
+              shown: keyUsage!.recent_details.length,
+              total: keyUsage!.recent_details.length
             })}
           </div>
         )}

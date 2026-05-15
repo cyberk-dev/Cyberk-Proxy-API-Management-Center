@@ -13,7 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func RegisterRoutes(engine *gin.Engine, cfg *config.Config, store *Store) {
+func RegisterRoutes(engine *gin.Engine, cfg *config.Config, store *Store, rl RateLimitResolver) {
 	auth := makeAuthMiddleware(cfg)
 
 	engine.GET("/v0/management/usage", auth, func(c *gin.Context) {
@@ -32,12 +32,27 @@ func RegisterRoutes(engine *gin.Engine, cfg *config.Config, store *Store) {
 
 	engine.GET("/v0/management/usage/keys/:key", auth, func(c *gin.Context) {
 		key := c.Param("key")
-		snap := store.KeySnapshot(key)
-		if snap == nil {
+
+		var since time.Time
+		if sinceStr := c.Query("since"); sinceStr != "" {
+			if ms, err := strconv.ParseInt(sinceStr, 10, 64); err == nil && ms > 0 {
+				since = time.UnixMilli(ms)
+			}
+		}
+
+		limit := 0
+		if limitStr := c.Query("limit"); limitStr != "" {
+			if v, err := strconv.Atoi(limitStr); err == nil && v > 0 {
+				limit = v
+			}
+		}
+
+		detail := store.KeyDetail(key, since, limit, rl, time.Now())
+		if detail == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "api key not found in usage data"})
 			return
 		}
-		c.JSON(http.StatusOK, snap)
+		c.JSON(http.StatusOK, detail)
 	})
 
 	engine.GET("/v0/management/usage/export", auth, func(c *gin.Context) {
