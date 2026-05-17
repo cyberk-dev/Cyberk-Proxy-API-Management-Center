@@ -85,14 +85,12 @@ func parseAnthropicMessage(body []byte, maxText int) []Block {
 			text, trunc, orig := truncateText(item.Get("text").String(), maxText)
 			blocks = append(blocks, textBlock(text, trunc, orig))
 		case "tool_use":
-			n, sha := hashRaw([]byte(item.Get("input").Raw))
-			blocks = append(blocks, Block{Type: "tool_use", Tool: item.Get("name").String(), Bytes: n, SHA256: sha})
+			blocks = append(blocks, toolBlock("tool_use", item.Get("name").String(), item.Get("input").Raw, maxText, false))
 		case "thinking":
-			// Anthropic extended-thinking block. Reference-only: hash + bytes
-			// rather than the raw chain of thought (often dozens of KB).
-			t := item.Get("thinking").String()
-			sum := sha256First8([]byte(t))
-			blocks = append(blocks, Block{Type: "thinking", Bytes: len(t), SHA256: sum})
+			// Anthropic extended-thinking block. Head+tail-truncated so a
+			// long chain of thought still shows its opening framing and
+			// final conclusion without saving the entire interior.
+			blocks = append(blocks, toolBlock("thinking", "", item.Get("thinking").String(), maxText, false))
 		}
 		return true
 	})
@@ -121,20 +119,18 @@ func parseOpenAIChatChoice(body []byte, maxText int) []Block {
 			return true
 		})
 	}
-	// reasoning_content (o1 / o3) — keep as reference-only block. Some
-	// SDKs name the field "reasoning" instead; check both.
+	// reasoning_content (o1 / o3) — head+tail-truncated so the reasoning
+	// preamble and conclusion stay legible. Some SDKs name the field
+	// "reasoning" instead; check both.
 	for _, key := range []string{"reasoning_content", "reasoning"} {
 		if r := msg.Get(key); r.Exists() && r.String() != "" {
-			t := r.String()
-			sum := sha256First8([]byte(t))
-			blocks = append(blocks, Block{Type: "thinking", Bytes: len(t), SHA256: sum})
+			blocks = append(blocks, toolBlock("thinking", "", r.String(), maxText, false))
 			break
 		}
 	}
 	msg.Get("tool_calls").ForEach(func(_, tc gjson.Result) bool {
 		args := tc.Get("function.arguments").String()
-		n, sha := hashRaw([]byte(args))
-		blocks = append(blocks, Block{Type: "tool_use", Tool: tc.Get("function.name").String(), Bytes: n, SHA256: sha})
+		blocks = append(blocks, toolBlock("tool_use", tc.Get("function.name").String(), args, maxText, false))
 		return true
 	})
 	return blocks
@@ -166,12 +162,11 @@ func parseOpenAIResponsesOutput(body []byte, maxText int) []Block {
 				return true
 			})
 		case "function_call":
-			args := item.Get("arguments").String()
-			n, sha := hashRaw([]byte(args))
-			blocks = append(blocks, Block{Type: "tool_use", Tool: item.Get("name").String(), Bytes: n, SHA256: sha})
+			blocks = append(blocks, toolBlock("tool_use", item.Get("name").String(), item.Get("arguments").String(), maxText, false))
 		case "reasoning":
 			// Reasoning items expose a `summary` array of `summary_text`
-			// parts. We capture the concatenated length + hash only.
+			// parts. Concatenate then head+tail-truncate so the surviving
+			// snippet covers the start and end of the reasoning trace.
 			var sb strings.Builder
 			item.Get("summary").ForEach(func(_, sum gjson.Result) bool {
 				sb.WriteString(sum.Get("text").String())
@@ -181,8 +176,7 @@ func parseOpenAIResponsesOutput(body []byte, maxText int) []Block {
 			if t == "" {
 				return true
 			}
-			sum := sha256First8([]byte(t))
-			blocks = append(blocks, Block{Type: "thinking", Bytes: len(t), SHA256: sum})
+			blocks = append(blocks, toolBlock("thinking", "", t, maxText, false))
 		}
 		return true
 	})
@@ -199,19 +193,16 @@ func parseGeminiCandidate(body []byte, maxText int) []Block {
 	var blocks []Block
 	parts.ForEach(func(_, part gjson.Result) bool {
 		if t := part.Get("text"); t.Exists() && t.String() != "" {
-			isThought := part.Get("thought").Bool()
-			text, trunc, orig := truncateText(t.String(), maxText)
-			if isThought {
-				sum := sha256First8([]byte(text))
-				blocks = append(blocks, Block{Type: "thinking", Bytes: orig, SHA256: sum})
+			if part.Get("thought").Bool() {
+				blocks = append(blocks, toolBlock("thinking", "", t.String(), maxText, false))
 				return true
 			}
+			text, trunc, orig := truncateText(t.String(), maxText)
 			blocks = append(blocks, textBlock(text, trunc, orig))
 			return true
 		}
 		if fc := part.Get("functionCall"); fc.Exists() {
-			n, sha := hashRaw([]byte(fc.Get("args").Raw))
-			blocks = append(blocks, Block{Type: "tool_use", Tool: fc.Get("name").String(), Bytes: n, SHA256: sha})
+			blocks = append(blocks, toolBlock("tool_use", fc.Get("name").String(), fc.Get("args").Raw, maxText, false))
 		}
 		return true
 	})
@@ -220,35 +211,33 @@ func parseGeminiCandidate(body []byte, maxText int) []Block {
 
 // parseGeminiStreamArray handles the `:streamGenerateContent` JSON-array
 // form (`[{chunk1}, {chunk2}, ...]`). Each element is a candidate-shaped
-// chunk; merging is the same as concatenating their parts. Text deltas are
-// joined into a single text block to keep block count low.
+// chunk; merging is the same as concatenating their parts. Text and
+// thinking deltas are joined into single blocks to keep block count low.
 func parseGeminiStreamArray(body []byte, maxText int) []Block {
 	arr := gjson.ParseBytes(body)
 	if !arr.IsArray() {
 		return nil
 	}
-	var textSB strings.Builder
+	var textSB, thinkSB strings.Builder
 	var toolBlocks []Block
-	var thinkBytes int
 	arr.ForEach(func(_, chunk gjson.Result) bool {
 		chunk.Get("candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
 			if t := part.Get("text"); t.Exists() {
 				if part.Get("thought").Bool() {
-					thinkBytes += len(t.String())
+					thinkSB.WriteString(t.String())
 					return true
 				}
 				textSB.WriteString(t.String())
 				return true
 			}
 			if fc := part.Get("functionCall"); fc.Exists() {
-				n, sha := hashRaw([]byte(fc.Get("args").Raw))
-				toolBlocks = append(toolBlocks, Block{Type: "tool_use", Tool: fc.Get("name").String(), Bytes: n, SHA256: sha})
+				toolBlocks = append(toolBlocks, toolBlock("tool_use", fc.Get("name").String(), fc.Get("args").Raw, maxText, false))
 			}
 			return true
 		})
 		return true
 	})
-	return finishAssembled(textSB.String(), thinkBytes, toolBlocks, maxText)
+	return finishAssembled(textSB.String(), thinkSB.String(), toolBlocks, maxText)
 }
 
 // parseSSE assembles a single response from the streamed SSE frames. The
@@ -352,11 +341,9 @@ func parseAnthropicSSE(body []byte, maxText int) []Block {
 			if t == "" {
 				continue
 			}
-			sum := sha256First8([]byte(t))
-			blocks = append(blocks, Block{Type: "thinking", Bytes: len(t), SHA256: sum})
+			blocks = append(blocks, toolBlock("thinking", "", t, maxText, false))
 		case "tool_use":
-			n, sha := hashRaw([]byte(a.toolJSON.String()))
-			blocks = append(blocks, Block{Type: "tool_use", Tool: a.toolName, Bytes: n, SHA256: sha})
+			blocks = append(blocks, toolBlock("tool_use", a.toolName, a.toolJSON.String(), maxText, false))
 		}
 	}
 	return blocks
@@ -407,14 +394,11 @@ func parseOpenAIChatSSE(body []byte, maxText int) []Block {
 		blocks = append(blocks, textBlock(text, trunc, orig))
 	}
 	if thinkSB.Len() > 0 {
-		t := thinkSB.String()
-		sum := sha256First8([]byte(t))
-		blocks = append(blocks, Block{Type: "thinking", Bytes: len(t), SHA256: sum})
+		blocks = append(blocks, toolBlock("thinking", "", thinkSB.String(), maxText, false))
 	}
 	for _, idx := range toolOrder {
 		t := tools[idx]
-		n, sha := hashRaw([]byte(t.args.String()))
-		blocks = append(blocks, Block{Type: "tool_use", Tool: t.name, Bytes: n, SHA256: sha})
+		blocks = append(blocks, toolBlock("tool_use", t.name, t.args.String(), maxText, false))
 	}
 	return blocks
 }
@@ -474,14 +458,11 @@ func parseOpenAIResponsesSSE(body []byte, maxText int) []Block {
 		blocks = append(blocks, textBlock(text, trunc, orig))
 	}
 	if thinkSB.Len() > 0 {
-		t := thinkSB.String()
-		sum := sha256First8([]byte(t))
-		blocks = append(blocks, Block{Type: "thinking", Bytes: len(t), SHA256: sum})
+		blocks = append(blocks, toolBlock("thinking", "", thinkSB.String(), maxText, false))
 	}
 	for _, id := range fcOrder {
 		f := fcs[id]
-		n, sha := hashRaw([]byte(f.args.String()))
-		blocks = append(blocks, Block{Type: "tool_use", Tool: f.name, Bytes: n, SHA256: sha})
+		blocks = append(blocks, toolBlock("tool_use", f.name, f.args.String(), maxText, false))
 	}
 	// When the SSE buffer was truncated mid-stream, a tail of
 	// `response.function_call_arguments.delta` events may have been dropped
@@ -498,17 +479,22 @@ func parseOpenAIResponsesSSE(body []byte, maxText int) []Block {
 		if len(blocks) == 0 {
 			return finalBlocks
 		}
+		// Dedup key combines tool name with the truncated content prefix.
+		// Two calls that share the same head+tail snippet must have come
+		// from the same arguments (truncation is deterministic), so this
+		// catches the legitimate duplicate without sha256 in the block.
+		dedupKey := func(b Block) string { return b.Tool + "|" + b.Text }
 		seen := make(map[string]struct{}, len(blocks))
 		for _, b := range blocks {
 			if b.Type == "tool_use" {
-				seen[b.Tool+"|"+b.SHA256] = struct{}{}
+				seen[dedupKey(b)] = struct{}{}
 			}
 		}
 		for _, b := range finalBlocks {
 			if b.Type != "tool_use" {
 				continue
 			}
-			if _, ok := seen[b.Tool+"|"+b.SHA256]; ok {
+			if _, ok := seen[dedupKey(b)]; ok {
 				continue
 			}
 			blocks = append(blocks, b)
@@ -521,40 +507,40 @@ func parseOpenAIResponsesSSE(body []byte, maxText int) []Block {
 // full candidate chunk — same shape as a non-streaming response — so we
 // concatenate their `parts[].text`. functionCall parts arrive whole.
 func parseGeminiSSE(body []byte, maxText int) []Block {
-	var textSB strings.Builder
-	var thinkBytes int
+	var textSB, thinkSB strings.Builder
 	var toolBlocks []Block
 	sseDataLines(body, func(payload []byte) bool {
 		gjson.GetBytes(payload, "candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
 			if t := part.Get("text"); t.Exists() {
 				if part.Get("thought").Bool() {
-					thinkBytes += len(t.String())
+					thinkSB.WriteString(t.String())
 					return true
 				}
 				textSB.WriteString(t.String())
 				return true
 			}
 			if fc := part.Get("functionCall"); fc.Exists() {
-				n, sha := hashRaw([]byte(fc.Get("args").Raw))
-				toolBlocks = append(toolBlocks, Block{Type: "tool_use", Tool: fc.Get("name").String(), Bytes: n, SHA256: sha})
+				toolBlocks = append(toolBlocks, toolBlock("tool_use", fc.Get("name").String(), fc.Get("args").Raw, maxText, false))
 			}
 			return true
 		})
 		return true
 	})
-	return finishAssembled(textSB.String(), thinkBytes, toolBlocks, maxText)
+	return finishAssembled(textSB.String(), thinkSB.String(), toolBlocks, maxText)
 }
 
 // finishAssembled is the common tail for stream-merge parsers: build a
-// single text block + a thinking-reference block + the per-tool blocks.
-func finishAssembled(text string, thinkBytes int, tools []Block, maxText int) []Block {
+// single text block + a thinking block + the per-tool blocks. Each
+// content type goes through head+tail truncation so a verbose model reply
+// or chain of thought still leaves readable snippets in the log.
+func finishAssembled(text, thinkText string, tools []Block, maxText int) []Block {
 	var blocks []Block
 	if text != "" {
 		t, trunc, orig := truncateText(text, maxText)
 		blocks = append(blocks, textBlock(t, trunc, orig))
 	}
-	if thinkBytes > 0 {
-		blocks = append(blocks, Block{Type: "thinking", Bytes: thinkBytes})
+	if thinkText != "" {
+		blocks = append(blocks, toolBlock("thinking", "", thinkText, maxText, false))
 	}
 	blocks = append(blocks, tools...)
 	return blocks

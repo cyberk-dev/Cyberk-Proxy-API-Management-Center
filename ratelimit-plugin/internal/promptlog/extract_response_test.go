@@ -32,10 +32,10 @@ func TestParseAssistant_AnthropicJSON(t *testing.T) {
 	if blocks[0].Type != "text" || blocks[0].Text != "Here is the answer." {
 		t.Errorf("text: %+v", blocks[0])
 	}
-	if blocks[1].Type != "tool_use" || blocks[1].Tool != "Read" || blocks[1].SHA256 == "" {
+	if blocks[1].Type != "tool_use" || blocks[1].Tool != "Read" || blocks[1].Text == "" {
 		t.Errorf("tool_use: %+v", blocks[1])
 	}
-	if blocks[2].Type != "thinking" || blocks[2].Bytes == 0 || blocks[2].SHA256 == "" {
+	if blocks[2].Type != "thinking" || blocks[2].Bytes == 0 || blocks[2].Text == "" {
 		t.Errorf("thinking ref: %+v", blocks[2])
 	}
 }
@@ -68,8 +68,11 @@ func TestParseAssistant_AnthropicSSE(t *testing.T) {
 	if blocks[1].Type != "tool_use" || blocks[1].Tool != "Bash" {
 		t.Errorf("tool: %+v", blocks[1])
 	}
-	if blocks[1].Bytes == 0 || blocks[1].SHA256 == "" {
-		t.Errorf("tool input not hashed: %+v", blocks[1])
+	if blocks[1].Bytes == 0 || blocks[1].Text == "" {
+		t.Errorf("tool input not captured as head+tail content: %+v", blocks[1])
+	}
+	if !strings.Contains(blocks[1].Text, "ls") {
+		t.Errorf("tool Text should contain assembled command: %q", blocks[1].Text)
 	}
 }
 
@@ -94,7 +97,7 @@ func TestParseAssistant_OpenAIChatJSON(t *testing.T) {
 	if tu := findBlock(blocks, "tool_use"); tu == nil || tu.Tool != "fetch" {
 		t.Errorf("tool_use: %+v", blocks)
 	}
-	if th := findBlock(blocks, "thinking"); th == nil || th.SHA256 == "" {
+	if th := findBlock(blocks, "thinking"); th == nil || th.Text == "" {
 		t.Errorf("thinking: %+v", blocks)
 	}
 }
@@ -113,7 +116,7 @@ func TestParseAssistant_OpenAIChatSSE(t *testing.T) {
 	if txt := findBlock(blocks, "text"); txt == nil || txt.Text != "Hello" {
 		t.Errorf("text assembly: %+v", blocks)
 	}
-	if tu := findBlock(blocks, "tool_use"); tu == nil || tu.Tool != "f" || tu.SHA256 == "" {
+	if tu := findBlock(blocks, "tool_use"); tu == nil || tu.Tool != "f" || tu.Text == "" {
 		t.Errorf("tool_use: %+v", blocks)
 	}
 }

@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
-import { IconChevronDown, IconX } from '@/components/ui/icons';
+import { IconChevronDown, IconChevronLeft, IconX } from '@/components/ui/icons';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useAuthStore } from '@/stores';
 import { promptsApi } from '@/services/api';
@@ -19,6 +19,7 @@ import styles from './PromptsPage.module.scss';
 
 const DEFAULT_LIMIT = 200;
 const INLINE_TEMPLATES_STORAGE_KEY = 'prompts.inlineTemplates';
+const KEYS_PANEL_COLLAPSED_STORAGE_KEY = 'prompts.keysPanelCollapsed';
 
 function relativeTime(iso?: string): string {
   if (!iso) return '—';
@@ -36,12 +37,6 @@ function timeOfDay(iso: string): string {
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return '';
   return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
-}
-
-function statusClass(status: number): string {
-  if (!status) return '';
-  if (status >= 200 && status < 300) return styles.statusOk;
-  return styles.statusErr;
 }
 
 function getErrorMessage(err: unknown, fallback: string): string {
@@ -126,6 +121,29 @@ export function PromptsPage() {
     } catch {
       /* localStorage unavailable — preference resets next reload */
     }
+  }, []);
+
+  // API-keys panel collapse: same localStorage shape as the templates
+  // toggle so per-user preference survives reloads. When collapsed the
+  // left column shrinks to a 36px rail that holds only the expand
+  // button — the keys list is hidden but discoverable.
+  const [keysCollapsed, setKeysCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(KEYS_PANEL_COLLAPSED_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleKeysCollapsed = useCallback(() => {
+    setKeysCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(KEYS_PANEL_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
+      } catch {
+        /* localStorage unavailable */
+      }
+      return next;
+    });
   }, []);
 
   const fetchTemplate = useCallback(async (hash: string): Promise<PromptTemplate | null> => {
@@ -293,12 +311,35 @@ export function PromptsPage() {
         <div className={styles.errorBox}>{usersError || detailError}</div>
       )}
 
-      <div className={`${styles.layout} ${showDetailColumn ? styles.withDetail : ''}`}>
-        {/* LEFT: user list */}
+      <div className={`${styles.layout} ${showDetailColumn ? styles.withDetail : ''} ${keysCollapsed ? styles.collapsedKeys : ''}`}>
+        {/* LEFT: user list (collapses to a thin rail with just the expand
+            toggle, freeing horizontal space for the sessions column) */}
+        {keysCollapsed ? (
+          <div className={styles.collapsedColumn}>
+            <button
+              type="button"
+              className={styles.collapseToggle}
+              onClick={toggleKeysCollapsed}
+              aria-label={t('prompts_page.keys_expand', { defaultValue: 'Show API keys panel' })}
+              title={t('prompts_page.keys_expand', { defaultValue: 'Show API keys panel' })}
+            >
+              <IconChevronLeft size={14} style={{ transform: 'rotate(180deg)' }} />
+            </button>
+          </div>
+        ) : (
         <div className={styles.column}>
           <div className={styles.columnHeader}>
             <span>{t('prompts_page.users', { defaultValue: 'API keys' })}</span>
             <span className={styles.badge}>{users.length}</span>
+            <button
+              type="button"
+              className={styles.collapseToggle}
+              onClick={toggleKeysCollapsed}
+              aria-label={t('prompts_page.keys_collapse', { defaultValue: 'Hide API keys panel' })}
+              title={t('prompts_page.keys_collapse', { defaultValue: 'Hide API keys panel' })}
+            >
+              <IconChevronLeft size={14} />
+            </button>
           </div>
           <form onSubmit={handlePasteSubmit} className={styles.pasteRow}>
             <Input
@@ -350,6 +391,7 @@ export function PromptsPage() {
             )}
           </div>
         </div>
+        )}
 
         {/* MIDDLE: tree */}
         <div className={styles.column}>
@@ -465,7 +507,6 @@ export function PromptsPage() {
                                             onClick={() => handleSelectMessage(sess, msg)}
                                           >
                                             <span className={styles.msgTime}>{timeOfDay(msg.ts)}</span>
-                                            <span className={styles.msgModel}>{msg.model || '—'}</span>
                                             <span className={styles.msgText}>
                                               <span className={`${styles.roleBadge} ${isAssistant ? '' : styles.roleBadgeUser}`}>
                                                 {isAssistant ? 'AI' : 'YOU'}
@@ -477,9 +518,6 @@ export function PromptsPage() {
                                                 </span>
                                               )}
                                               {suffix.slice(0, 200) || (tplHash ? '' : '(empty)')}
-                                            </span>
-                                            <span className={`${styles.msgStatus} ${statusClass(msg.status)}`}>
-                                              {msg.status || ''}
                                             </span>
                                           </button>
                                         );
@@ -522,14 +560,8 @@ export function PromptsPage() {
               <div className={styles.detailMeta}>
                 <span className={styles.detailMetaKey}>Time</span>
                 <span className={styles.detailMetaVal}>{new Date(selectedMessage.ts).toLocaleString()}</span>
-                <span className={styles.detailMetaKey}>Model</span>
-                <span className={styles.detailMetaVal}>{selectedMessage.model || '—'}</span>
                 <span className={styles.detailMetaKey}>Provider</span>
                 <span className={styles.detailMetaVal}>{selectedMessage.provider || '—'}</span>
-                <span className={styles.detailMetaKey}>Status</span>
-                <span className={`${styles.detailMetaVal} ${statusClass(selectedMessage.status)}`}>
-                  {selectedMessage.status || '—'}
-                </span>
                 <span className={styles.detailMetaKey}>Client</span>
                 <span className={styles.detailMetaVal}>
                   {selectedSession.client}

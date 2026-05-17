@@ -226,18 +226,28 @@ func summarizeNonText(b Block) string {
 		sb.WriteByte(' ')
 		sb.WriteString(formatBytes(b.Bytes))
 	}
-	if b.SHA256 != "" {
-		sb.WriteString(" sha256=")
-		sb.WriteString(b.SHA256)
-	}
-	if b.URL != "" {
-		sb.WriteByte(' ')
-		sb.WriteString(b.URL)
-	}
 	if b.IsError {
 		sb.WriteString(" error")
 	}
+	// Binary blobs (image / document / audio) carry no human-readable
+	// text, so we keep their fingerprint and remote URL for traceability.
+	// Tool / thinking blocks instead show the head+tail content body on
+	// the next line — sha is redundant once the content is right there.
+	if b.Text == "" {
+		if b.SHA256 != "" {
+			sb.WriteString(" sha256=")
+			sb.WriteString(b.SHA256)
+		}
+		if b.URL != "" {
+			sb.WriteByte(' ')
+			sb.WriteString(b.URL)
+		}
+		sb.WriteByte(']')
+		return sb.String()
+	}
 	sb.WriteByte(']')
+	sb.WriteByte('\n')
+	sb.WriteString(b.Text)
 	return sb.String()
 }
 
@@ -380,19 +390,17 @@ func extractAnthropicBlock(item gjson.Result, maxText int) (Block, bool) {
 	case "document":
 		return maskAnthropicSource(item.Get("source"), "document"), true
 	case "tool_use":
-		// Reference-only: capture tool name + fingerprint of the input. The
-		// raw input JSON can be huge (Read output passed back as a follow-up
-		// call, for instance), so we never copy it verbatim — size + hash is
-		// enough to correlate with the assistant turn that produced it.
-		n, sha := hashRaw([]byte(item.Get("input").Raw))
-		return Block{Type: "tool_use", Tool: item.Get("name").String(), Bytes: n, SHA256: sha}, true
+		// Reference-only with readable content: capture tool name + the
+		// input JSON head+tail-truncated. Hashes are unreadable noise for a
+		// human auditor; keeping the start and end of the payload preserves
+		// "what was called with what parameters" even when the body is huge.
+		return toolBlock("tool_use", item.Get("name").String(), item.Get("input").Raw, maxText, false), true
 	case "tool_result":
-		// content can be a bare string OR an array of typed sub-blocks; in
-		// both cases the raw JSON length + hash is the cheapest faithful
-		// fingerprint, and is_error preserves the failure signal that's the
-		// most useful single bit for offline analysis.
-		n, sha := hashRaw([]byte(item.Get("content").Raw))
-		return Block{Type: "tool_result", Bytes: n, SHA256: sha, IsError: item.Get("is_error").Bool()}, true
+		// content can be a bare string OR an array of typed sub-blocks; the
+		// raw JSON is head+tail-trimmed so a long Read output still shows
+		// its file path / opening lines without filling the log.
+		b := toolBlock("tool_result", "", item.Get("content").Raw, maxText, item.Get("is_error").Bool())
+		return b, true
 	case "":
 		return Block{}, false
 	default:
@@ -552,17 +560,15 @@ func extractGeminiPart(part gjson.Result, maxText int) (Block, bool) {
 			URL:       file.Get("fileUri").String(),
 		}, true
 	}
-	// Tool / function-call parts: emit a reference-only block, same shape as
-	// Anthropic tool_use / tool_result. functionResponse carries the tool
-	// output back to the model; Gemini does not surface an is_error flag at
-	// the part level, so we leave IsError zero.
+	// Tool / function-call parts: emit head+tail-truncated content, same
+	// shape as Anthropic tool_use / tool_result. functionResponse carries
+	// the tool output back to the model; Gemini does not surface an
+	// is_error flag at the part level, so IsError stays zero.
 	if fc := part.Get("functionCall"); fc.Exists() {
-		n, sha := hashRaw([]byte(fc.Get("args").Raw))
-		return Block{Type: "tool_use", Tool: fc.Get("name").String(), Bytes: n, SHA256: sha}, true
+		return toolBlock("tool_use", fc.Get("name").String(), fc.Get("args").Raw, maxText, false), true
 	}
 	if fr := part.Get("functionResponse"); fr.Exists() {
-		n, sha := hashRaw([]byte(fr.Get("response").Raw))
-		return Block{Type: "tool_result", Tool: fr.Get("name").String(), Bytes: n, SHA256: sha}, true
+		return toolBlock("tool_result", fr.Get("name").String(), fr.Get("response").Raw, maxText, false), true
 	}
 	return Block{}, false
 }

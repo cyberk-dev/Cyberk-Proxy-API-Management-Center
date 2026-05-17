@@ -235,13 +235,15 @@ func (w *Writer) run() {
 					w.templates.Touch(hash, ts)
 				}
 			}
-			// Strip text-block bodies: their content is already in Entry.Prompt
-			// (joined and possibly template-shortened). Keeping it per-block
-			// duplicates ~45% of every record. Block.Bytes captures the
-			// original-block byte length so consumers can still see the
-			// structure of multi-block prompts.
+			// Strip Block.Text on every block whose content already lives in
+			// Entry.Prompt (joinPromptText concatenated it in, possibly via
+			// summarizeNonText for tool / thinking blocks). Keeping it
+			// per-block duplicated ~45% of every record before the strip
+			// landed. Block.Bytes preserves the original length so consumers
+			// can still see how big each contribution was. Image / document
+			// / audio carry no Text — the strip is a no-op for them.
 			for i := range e.Blocks {
-				if e.Blocks[i].Type != "text" {
+				if e.Blocks[i].Text == "" {
 					continue
 				}
 				if e.Blocks[i].Bytes == 0 {

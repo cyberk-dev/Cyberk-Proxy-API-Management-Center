@@ -88,6 +88,25 @@ func truncateAtRuneFromEnd(s string, n int) string {
 	return s[start:]
 }
 
+// toolBlock builds the normalized form of a tool_use / tool_result /
+// thinking / reasoning block: tool name (when present), the original byte
+// length, and the body itself head+tail-truncated at max. Hashing was
+// tried first and rejected — operators reading the log want to see the
+// command that was issued and its first/last output lines, not a 16-char
+// hex digest. The truncation runs through the same head+tail helper as
+// regular text blocks so the elision marker shape is consistent.
+func toolBlock(kind, tool, raw string, max int, isError bool) Block {
+	text, trunc, orig := truncateText(raw, max)
+	return Block{
+		Type:      kind,
+		Tool:      tool,
+		Text:      text,
+		Bytes:     orig,
+		Truncated: trunc,
+		IsError:   isError,
+	}
+}
+
 // hashRaw returns (byte length, short-sha256) for an arbitrary raw byte slice.
 // Used for tool_use input bodies and tool_result content bodies so the log
 // captures fingerprint + size without copying the payload itself.

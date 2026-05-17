@@ -83,11 +83,15 @@ func TestExtract_AnthropicToolBlocksReferenceOnly(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("expected 2 blocks, got %+v", blocks)
 	}
-	if blocks[0].Type != "tool_result" || !blocks[0].IsError || blocks[0].SHA256 == "" || blocks[0].Bytes == 0 {
+	if blocks[0].Type != "tool_result" || !blocks[0].IsError || blocks[0].Bytes == 0 {
 		t.Errorf("tool_result reference: %+v", blocks[0])
 	}
-	if blocks[0].Text != "" {
-		t.Errorf("tool_result must NOT carry content text, got %q", blocks[0].Text)
+	// New shape: head+tail-truncated content lives in Text, not sha256.
+	if blocks[0].Text == "" {
+		t.Errorf("tool_result must carry head+tail content, got empty Text")
+	}
+	if blocks[0].SHA256 != "" {
+		t.Errorf("tool_result should not emit sha256 once Text is present: %+v", blocks[0])
 	}
 	if blocks[1].Type != "text" || blocks[1].Text != "follow-up" {
 		t.Errorf("text: %+v", blocks[1])
@@ -107,8 +111,11 @@ func TestExtract_AnthropicToolUseReference(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("got %+v", blocks)
 	}
-	if blocks[0].Type != "tool_use" || blocks[0].Tool != "Read" || blocks[0].SHA256 == "" {
+	if blocks[0].Type != "tool_use" || blocks[0].Tool != "Read" || blocks[0].Text == "" {
 		t.Errorf("tool_use reference: %+v", blocks[0])
+	}
+	if !strings.Contains(blocks[0].Text, "/x.go") {
+		t.Errorf("tool_use Text should contain the file_path argument: %q", blocks[0].Text)
 	}
 }
 
@@ -271,8 +278,11 @@ func TestExtract_GeminiFunctionCallsReferenceOnly(t *testing.T) {
 	if len(blocks) != 2 {
 		t.Fatalf("got %+v", blocks)
 	}
-	if blocks[0].Type != "tool_result" || blocks[0].Tool != "getWeather" || blocks[0].SHA256 == "" {
+	if blocks[0].Type != "tool_result" || blocks[0].Tool != "getWeather" || blocks[0].Text == "" {
 		t.Errorf("tool_result ref: %+v", blocks[0])
+	}
+	if !strings.Contains(blocks[0].Text, "72") {
+		t.Errorf("tool_result Text should contain the response payload: %q", blocks[0].Text)
 	}
 	if blocks[1].Text != "ok" {
 		t.Errorf("text: %+v", blocks[1])

@@ -58,12 +58,49 @@
     grid-template-columns: 300px 1fr 380px;
   }
 
+  // When the operator collapses the API-keys panel, that column shrinks
+  // to a slim rail so the sessions column gets the reclaimed width. The
+  // rail still holds the toggle button so the panel is one click from
+  // being restored.
+  &.collapsedKeys {
+    grid-template-columns: 36px 1fr;
+    &.withDetail {
+      grid-template-columns: 36px 1fr 380px;
+    }
+  }
+
   @include mobile {
     grid-template-columns: 1fr;
     &.withDetail {
       grid-template-columns: 1fr;
     }
+    &.collapsedKeys {
+      grid-template-columns: 1fr;
+    }
   }
+}
+
+.collapsedColumn {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: $spacing-sm;
+}
+
+.collapseToggle {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.08)); }
 }
 
 .column {
@@ -343,7 +380,7 @@
 .messageRow {
   @include button-reset;
   display: grid;
-  grid-template-columns: 60px 90px 1fr 36px;
+  grid-template-columns: 60px 1fr;
   gap: $spacing-sm;
   padding: 4px $spacing-sm;
   font-size: 12px;
