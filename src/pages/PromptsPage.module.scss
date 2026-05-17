@@ -394,10 +394,6 @@
   transition: background 0.1s ease;
 
   &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.08)); }
-  &.selectedMsg {
-    background: var(--surface-selected, rgba(99, 102, 241, 0.14));
-    box-shadow: inset 3px 0 0 var(--accent, #6366f1);
-  }
 
   // Chat-style hierarchy: user prompts are the focus of the page so they
   // keep full contrast and a thin accent rail. Assistant replies are
@@ -413,6 +409,17 @@
     background: var(--surface-muted, rgba(127, 127, 127, 0.04));
     .msgText { color: var(--text-secondary); }
     .msgTime { opacity: 0.6; }
+  }
+
+  // selectedMsg is declared LAST so source-order specificity (same as
+  // role classes, but later wins) lets it override the role-class
+  // box-shadow rail and assistant muted background. Without this order
+  // a selected user row keeps the 2px role rail (loses the 3px selection
+  // rail) and a selected assistant row keeps its muted bg (no selection
+  // bg change). Reorder, don't bump specificity — keeps the cascade flat.
+  &.selectedMsg {
+    background: var(--surface-selected, rgba(99, 102, 241, 0.14));
+    box-shadow: inset 3px 0 0 var(--accent, #6366f1);
   }
 }
 
