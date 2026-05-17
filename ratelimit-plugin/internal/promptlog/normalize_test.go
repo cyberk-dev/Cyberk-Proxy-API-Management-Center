@@ -29,7 +29,7 @@ func TestTruncateText_Long(t *testing.T) {
 	if !strings.HasSuffix(got, "bbbb") {
 		t.Errorf("tail lost")
 	}
-	if !strings.Contains(got, "[truncated") {
+	if !strings.Contains(got, "[elided") {
 		t.Errorf("marker missing: %q", got)
 	}
 }

@@ -153,6 +153,22 @@ var syntheticCLIPrefixes = []string{
 	"Create a new anchored summary from the conversation history above",
 }
 
+// isToolOnly reports whether every block is a tool reference (tool_use or
+// tool_result). Such turns are agent-loop continuations with no fresh user
+// content, so the middleware suppresses them to avoid inflating entry count
+// with tool round-trips that carry no new prompt information.
+func isToolOnly(blocks []Block) bool {
+	if len(blocks) == 0 {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type != "tool_use" && b.Type != "tool_result" {
+			return false
+		}
+	}
+	return true
+}
+
 // isSyntheticCLIPrompt reports whether the message is a CLI-internal prompt
 // rather than human-typed content. Detection looks at the FIRST text block
 // only — if a real user message happened to mix human prose with one of
@@ -198,6 +214,10 @@ func summarizeNonText(b Block) string {
 	var sb strings.Builder
 	sb.WriteByte('[')
 	sb.WriteString(b.Type)
+	if b.Tool != "" {
+		sb.WriteByte(' ')
+		sb.WriteString(b.Tool)
+	}
 	if b.MediaType != "" {
 		sb.WriteByte(':')
 		sb.WriteString(b.MediaType)
@@ -213,6 +233,9 @@ func summarizeNonText(b Block) string {
 	if b.URL != "" {
 		sb.WriteByte(' ')
 		sb.WriteString(b.URL)
+	}
+	if b.IsError {
+		sb.WriteString(" error")
 	}
 	sb.WriteByte(']')
 	return sb.String()
@@ -356,10 +379,20 @@ func extractAnthropicBlock(item gjson.Result, maxText int) (Block, bool) {
 		return maskAnthropicSource(item.Get("source"), "image"), true
 	case "document":
 		return maskAnthropicSource(item.Get("source"), "document"), true
-	case "tool_use", "tool_result":
-		// These appear in the user-role array for tool round-trips. They
-		// represent model/tool exchanges, not user-authored content.
-		return Block{}, false
+	case "tool_use":
+		// Reference-only: capture tool name + fingerprint of the input. The
+		// raw input JSON can be huge (Read output passed back as a follow-up
+		// call, for instance), so we never copy it verbatim — size + hash is
+		// enough to correlate with the assistant turn that produced it.
+		n, sha := hashRaw([]byte(item.Get("input").Raw))
+		return Block{Type: "tool_use", Tool: item.Get("name").String(), Bytes: n, SHA256: sha}, true
+	case "tool_result":
+		// content can be a bare string OR an array of typed sub-blocks; in
+		// both cases the raw JSON length + hash is the cheapest faithful
+		// fingerprint, and is_error preserves the failure signal that's the
+		// most useful single bit for offline analysis.
+		n, sha := hashRaw([]byte(item.Get("content").Raw))
+		return Block{Type: "tool_result", Bytes: n, SHA256: sha, IsError: item.Get("is_error").Bool()}, true
 	case "":
 		return Block{}, false
 	default:
@@ -519,9 +552,17 @@ func extractGeminiPart(part gjson.Result, maxText int) (Block, bool) {
 			URL:       file.Get("fileUri").String(),
 		}, true
 	}
-	// Tool / function-call parts: drop, same reasoning as Anthropic tool_use.
-	if part.Get("functionCall").Exists() || part.Get("functionResponse").Exists() {
-		return Block{}, false
+	// Tool / function-call parts: emit a reference-only block, same shape as
+	// Anthropic tool_use / tool_result. functionResponse carries the tool
+	// output back to the model; Gemini does not surface an is_error flag at
+	// the part level, so we leave IsError zero.
+	if fc := part.Get("functionCall"); fc.Exists() {
+		n, sha := hashRaw([]byte(fc.Get("args").Raw))
+		return Block{Type: "tool_use", Tool: fc.Get("name").String(), Bytes: n, SHA256: sha}, true
+	}
+	if fr := part.Get("functionResponse"); fr.Exists() {
+		n, sha := hashRaw([]byte(fr.Get("response").Raw))
+		return Block{Type: "tool_result", Tool: fr.Get("name").String(), Bytes: n, SHA256: sha}, true
 	}
 	return Block{}, false
 }

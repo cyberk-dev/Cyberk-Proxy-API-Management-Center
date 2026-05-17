@@ -187,6 +187,126 @@ func TestMiddleware_KeepsNonClaudeCodeWithoutCWD(t *testing.T) {
 	}
 }
 
+func TestMiddleware_LogsAssistantResponseAnthropic(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	cfg := &Config{
+		Enabled:              true,
+		Dir:                  dir,
+		MaxTextBytes:         1024,
+		QueueSize:            16,
+		LogAssistantResponse: true,
+		MaxResponseBytes:     64 * 1024,
+	}
+	r := gin.New()
+	r.Use(Middleware(cfg, w))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"id":      "msg_1",
+			"role":    "assistant",
+			"content": []gin.H{{"type": "text", "text": "hello back"}},
+		})
+	})
+
+	body := `{"model":"claude","messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 2 {
+		t.Fatalf("expected user+assistant pair, got %d: %+v", len(entries), entries)
+	}
+	var sawUser, sawAssistant bool
+	for _, e := range entries {
+		role, _ := e["role"].(string)
+		switch role {
+		case "user":
+			sawUser = true
+			if e["prompt"] != "hi" {
+				t.Errorf("user prompt: %v", e["prompt"])
+			}
+		case "assistant":
+			sawAssistant = true
+			if e["prompt"] != "hello back" {
+				t.Errorf("assistant prompt: %v", e["prompt"])
+			}
+		}
+	}
+	if !sawUser || !sawAssistant {
+		t.Errorf("missing role(s): user=%v assistant=%v", sawUser, sawAssistant)
+	}
+}
+
+func TestMiddleware_AssistantSkipsWhenDisabled(t *testing.T) {
+	// Default Config (LogAssistantResponse unset) must NOT emit an assistant
+	// entry — preserves opt-in behavior when callers construct cfg without
+	// going through ParseBytes.
+	dir := t.TempDir()
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	cfg := &Config{Enabled: true, Dir: dir, MaxTextBytes: 1024, QueueSize: 16}
+	r := gin.New()
+	r.Use(Middleware(cfg, w))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"content": []gin.H{{"type": "text", "text": "hello"}}})
+	})
+
+	body := `{"messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected only user entry when assistant logging off, got %d", len(entries))
+	}
+	if role, _ := entries[0]["role"].(string); role != "user" {
+		t.Errorf("expected role=user, got %q", role)
+	}
+}
+
+func TestMiddleware_AssistantSkipsOnErrorStatus(t *testing.T) {
+	// 4xx/5xx responses have no useful assistant content — skip the second
+	// entry even when LogAssistantResponse is on.
+	dir := t.TempDir()
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	cfg := &Config{
+		Enabled:              true,
+		Dir:                  dir,
+		MaxTextBytes:         1024,
+		QueueSize:            16,
+		LogAssistantResponse: true,
+		MaxResponseBytes:     64 * 1024,
+	}
+	r := gin.New()
+	r.Use(Middleware(cfg, w))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limit"})
+	})
+
+	body := `{"messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("error response must not yield assistant entry, got %d", len(entries))
+	}
+}
+
 func readAllEntries(t *testing.T, dir string) []map[string]any {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(dir, "prompts-*.jsonl"))

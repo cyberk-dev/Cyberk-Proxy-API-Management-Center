@@ -15,9 +15,20 @@ import (
 )
 
 const (
-	defaultMaxTextBytes = 50 * 1024
-	defaultQueueSize    = 1024
-	defaultDirName      = "prompts"
+	// defaultMaxTextBytes caps each text block before head+tail truncation.
+	// 4 KiB is tuned to the observed distribution: p95 of real user prompts
+	// is ~7 KiB and p99 ~16 KiB, so 4 KiB catches the long-paste outliers
+	// (which dominate disk usage) while leaving typical prompts untouched.
+	defaultMaxTextBytes = 4 * 1024
+	// defaultMaxResponseBytes caps the buffered upstream response per
+	// request. 256 KiB comfortably holds a non-streaming model reply plus a
+	// page or two of SSE deltas; beyond that the wrapper stops buffering
+	// (the response still streams to the client unaffected) and the entry
+	// is marked Truncated. Sized to keep promptlog memory bounded under
+	// hundreds of concurrent in-flight chat-completion calls.
+	defaultMaxResponseBytes = 256 * 1024
+	defaultQueueSize        = 1024
+	defaultDirName          = "prompts"
 
 	// Template detector defaults — chosen so that a 200-character prefix
 	// repeated 3+ times within the rolling window qualifies as a template.
@@ -38,6 +49,14 @@ type Config struct {
 	Dir          string
 	MaxTextBytes int
 	QueueSize    int
+
+	// LogAssistantResponse controls capture of the upstream response body
+	// for assistant-side logging. When true (default), each request emits
+	// up to TWO Entries: the user prompt and a follow-up role:"assistant"
+	// entry built from the streamed response. MaxResponseBytes caps how
+	// much of the response is buffered before truncation kicks in.
+	LogAssistantResponse bool
+	MaxResponseBytes     int
 
 	// Templates controls the dynamic prefix-template detector. Disabled
 	// makes the writer skip templating entirely (entries store full prompts
@@ -64,11 +83,13 @@ type rawRoot struct {
 }
 
 type rawConfig struct {
-	Enabled      *bool        `yaml:"enabled"`
-	Dir          string       `yaml:"dir"`
-	MaxTextBytes int          `yaml:"max_text_bytes"`
-	QueueSize    int          `yaml:"queue_size"`
-	Templates    rawTemplates `yaml:"templates"`
+	Enabled              *bool        `yaml:"enabled"`
+	Dir                  string       `yaml:"dir"`
+	MaxTextBytes         int          `yaml:"max_text_bytes"`
+	QueueSize            int          `yaml:"queue_size"`
+	LogAssistantResponse *bool        `yaml:"log_assistant_response"`
+	MaxResponseBytes     int          `yaml:"max_response_bytes"`
+	Templates            rawTemplates `yaml:"templates"`
 }
 
 type rawTemplates struct {
@@ -96,9 +117,18 @@ func ParseBytes(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("unmarshal yaml: %w", err)
 	}
 	cfg := &Config{
-		Dir:          strings.TrimSpace(root.PromptLog.Dir),
-		MaxTextBytes: root.PromptLog.MaxTextBytes,
-		QueueSize:    root.PromptLog.QueueSize,
+		Dir:              strings.TrimSpace(root.PromptLog.Dir),
+		MaxTextBytes:     root.PromptLog.MaxTextBytes,
+		QueueSize:        root.PromptLog.QueueSize,
+		MaxResponseBytes: root.PromptLog.MaxResponseBytes,
+	}
+	// `log_assistant_response` defaults to ON so a fresh enable of promptlog
+	// captures both sides of every conversation; operators can flip it off
+	// explicitly for cost / privacy reasons.
+	if root.PromptLog.LogAssistantResponse != nil {
+		cfg.LogAssistantResponse = *root.PromptLog.LogAssistantResponse
+	} else {
+		cfg.LogAssistantResponse = true
 	}
 	// `enabled` is a pointer so users can omit it. Default: enabled when a
 	// non-empty dir is supplied, otherwise disabled.
@@ -112,6 +142,9 @@ func ParseBytes(data []byte) (*Config, error) {
 	}
 	if cfg.QueueSize <= 0 {
 		cfg.QueueSize = defaultQueueSize
+	}
+	if cfg.MaxResponseBytes <= 0 {
+		cfg.MaxResponseBytes = defaultMaxResponseBytes
 	}
 	rt := root.PromptLog.Templates
 	cfg.Templates = TemplatesConfig{

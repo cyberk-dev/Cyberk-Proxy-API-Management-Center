@@ -244,6 +244,7 @@ type Message struct {
 	Model          string    `json:"model,omitempty"`
 	Provider       string    `json:"provider,omitempty"`
 	Status         int       `json:"status"`
+	Role           string    `json:"role,omitempty"`
 	Prompt         string    `json:"prompt"`
 	PromptTemplate string    `json:"prompt_template,omitempty"`
 	Blocks         []Block   `json:"blocks,omitempty"`
@@ -352,11 +353,20 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, pe
 			s.firstSeen = e.Timestamp
 		}
 		// Keep the most recent perSessionLimit messages via a sliding window.
+		role := e.Role
+		if role == "" {
+			// Legacy entries (written before assistant-side capture existed)
+			// have no role field. Normalize to "user" here so downstream
+			// consumers — including any strict `role === 'user'` predicate
+			// in the UI — never have to special-case empty.
+			role = "user"
+		}
 		s.msgs = append(s.msgs, Message{
 			Timestamp:      e.Timestamp,
 			Model:          e.Model,
 			Provider:       e.Provider,
 			Status:         e.Status,
+			Role:           role,
 			Prompt:         e.Prompt,
 			PromptTemplate: e.PromptTemplate,
 		})

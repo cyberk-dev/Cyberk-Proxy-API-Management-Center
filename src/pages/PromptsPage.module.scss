@@ -200,20 +200,24 @@
   padding: $spacing-sm $spacing-md;
   text-align: left;
   cursor: pointer;
-  background: var(--surface-secondary, transparent);
+  background: var(--surface-secondary, rgba(127, 127, 127, 0.08));
   border-bottom: 1px solid var(--border-color);
   transition: background 0.12s ease;
+  // Hairline accent strip on the left so the layer reads as "header" even
+  // before scanning the chevron / monospace path.
+  box-shadow: inset 2px 0 0 var(--border-color);
 
-  &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.06)); }
+  &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.12)); }
 }
 
 .cwdPath {
   font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--text-primary);
   word-break: break-all;
   flex: 1;
+  letter-spacing: 0.01em;
 }
 
 .chevron {
@@ -230,15 +234,73 @@
 
 .chevronOpen { transform: rotate(0deg); }
 
+.chevronSm {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+}
+
 .sessionList {
   display: flex;
   flex-direction: column;
+  // Indent sessions under their parent CWD and run a vertical guide line at
+  // the level of the CWD chevron so the layer reads as a tree branch.
+  // 22px ≈ cwdHeader padding-left (16) + half chevron width (~6); tweak in
+  // pairs with .cwdHeader if either changes.
+  position: relative;
+  padding: $spacing-xs 0 $spacing-xs 28px;
+
+  &::before {
+    content: '';
+    position: absolute;
+    left: 22px;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--border-color);
+  }
 }
 
 .sessionCard {
-  padding: $spacing-sm $spacing-md;
-  border-bottom: 1px solid var(--border-color);
-  &:last-child { border-bottom: none; }
+  padding: 2px $spacing-md 2px 0;
+  position: relative;
+
+  // Short horizontal tick from the vertical guide line into each session
+  // toggle so the parent-child connection is explicit.
+  &::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 14px;
+    width: 6px;
+    height: 1px;
+    background: var(--border-color);
+  }
+}
+
+.sessionToggle {
+  @include button-reset;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  padding: 4px $spacing-sm;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.12s ease;
+
+  &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.06)); }
+}
+
+.sessionTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-primary);
 }
 
 .sessionHead {
@@ -246,7 +308,9 @@
   flex-wrap: wrap;
   align-items: center;
   gap: $spacing-sm;
-  margin-bottom: $spacing-xs;
+  margin: $spacing-xs 0 $spacing-xs $spacing-sm;
+  padding-left: $spacing-md;
+  border-left: 1px dashed var(--border-color);
 }
 
 .sessionId {
@@ -269,6 +333,11 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  // Align the expanded message list with .sessionHead so messages read as
+  // children of the parent session, not siblings of the toggle row.
+  margin-left: $spacing-sm;
+  padding-left: $spacing-md;
+  border-left: 1px dashed var(--border-color);
 }
 
 .messageRow {
@@ -289,6 +358,40 @@
     background: var(--surface-selected, rgba(99, 102, 241, 0.14));
     box-shadow: inset 3px 0 0 var(--accent, #6366f1);
   }
+
+  // Chat-style hierarchy: user prompts are the focus of the page so they
+  // keep full contrast and a thin accent rail. Assistant replies are
+  // supporting context — indented, dimmer text, no accent — so the eye
+  // tracks conversation turn-taking without re-reading every model word.
+  &.userMsg {
+    box-shadow: inset 2px 0 0 var(--accent, #6366f1);
+  }
+  &.assistantMsg {
+    margin-left: $spacing-md;
+    padding-left: $spacing-sm;
+    color: var(--text-secondary);
+    opacity: 0.85;
+    background: var(--surface-muted, rgba(127, 127, 127, 0.04));
+
+    .msgText { color: var(--text-secondary); }
+  }
+}
+
+.roleBadge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 4px;
+  margin-right: 4px;
+  vertical-align: middle;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.12));
+  color: var(--text-secondary);
+}
+.roleBadgeUser {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.18));
+  color: var(--accent, #6366f1);
 }
 
 .msgTime {

@@ -89,6 +89,52 @@ func TestWriter_RejectsEmptyDir(t *testing.T) {
 	}
 }
 
+func TestWriter_StripsBlockTextBeforeEncode(t *testing.T) {
+	// Block.Text duplicates Entry.Prompt — the writer must strip it so the
+	// JSONL line carries the content once (in `prompt`). Block.Bytes
+	// preserves the per-block size for offline reconstruction of structure.
+	dir := t.TempDir()
+	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	w.Submit(&Entry{
+		Timestamp: ts,
+		Provider:  ProviderAnthropic,
+		Path:      "/v1/messages",
+		Prompt:    "hello world",
+		Blocks: []Block{
+			{Type: "text", Text: "hello world"},
+			{Type: "image", MediaType: "image/png", Bytes: 1024, SHA256: "abcd"},
+		},
+	})
+	w.Close()
+
+	entries := readDailyFile(t, dir, "2026-05-17")
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries", len(entries))
+	}
+	if entries[0]["prompt"] != "hello world" {
+		t.Errorf("prompt lost: %v", entries[0])
+	}
+	blocks, _ := entries[0]["blocks"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks: %+v", entries[0])
+	}
+	txt, _ := blocks[0].(map[string]any)
+	if _, hasText := txt["text"]; hasText {
+		t.Errorf("text block must not carry text field, got %+v", txt)
+	}
+	if got, ok := txt["bytes"].(float64); !ok || int(got) != len("hello world") {
+		t.Errorf("text block bytes wrong: %+v", txt)
+	}
+	img, _ := blocks[1].(map[string]any)
+	if img["sha256"] != "abcd" {
+		t.Errorf("non-text block metadata clobbered: %+v", img)
+	}
+}
+
 func TestWriter_SubmitAfterClose(t *testing.T) {
 	dir := t.TempDir()
 	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})

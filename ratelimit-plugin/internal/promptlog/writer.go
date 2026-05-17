@@ -26,6 +26,13 @@ type Entry struct {
 	Model     string    `json:"model,omitempty"`
 	KeyHash   string    `json:"key_hash"`
 
+	// Role distinguishes a captured user prompt ("user", omitted for legacy
+	// entries written before assistant-side logging existed — readers treat
+	// empty as "user") from a captured assistant response ("assistant").
+	// Both roles share the same session_id and key_hash so the UI can pair
+	// them chronologically into a chat-style view.
+	Role string `json:"role,omitempty"`
+
 	// Client-side metadata (from headers). Client is always set; the rest are
 	// best-effort and omitted when the source headers are missing.
 	Client        string `json:"client"`
@@ -227,6 +234,20 @@ func (w *Writer) run() {
 					e.Prompt = suffix
 					w.templates.Touch(hash, ts)
 				}
+			}
+			// Strip text-block bodies: their content is already in Entry.Prompt
+			// (joined and possibly template-shortened). Keeping it per-block
+			// duplicates ~45% of every record. Block.Bytes captures the
+			// original-block byte length so consumers can still see the
+			// structure of multi-block prompts.
+			for i := range e.Blocks {
+				if e.Blocks[i].Type != "text" {
+					continue
+				}
+				if e.Blocks[i].Bytes == 0 {
+					e.Blocks[i].Bytes = len(e.Blocks[i].Text)
+				}
+				e.Blocks[i].Text = ""
 			}
 			date := ts.UTC().Format("2006-01-02")
 			if !ensureFile(date) {

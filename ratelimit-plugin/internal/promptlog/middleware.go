@@ -63,9 +63,13 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		}
 
 		blocks := extractBlocks(peek.Body, provider, cfg.MaxTextBytes)
-		if len(blocks) == 0 {
-			// No user-authored content (no user-role message, or only
-			// tool_result / wrapper-noise blocks). Nothing meaningful to log.
+		if len(blocks) == 0 || isToolOnly(blocks) {
+			// Nothing human-authored: empty extraction (no user-role message,
+			// wrapper-noise only) or pure agent-loop continuation whose last
+			// user message is just tool_use / tool_result references. Logging
+			// the latter would balloon entry count without adding new prompt
+			// content (the assistant turn that issued the tool call is not in
+			// this request's user-role content).
 			c.Next()
 			return
 		}
@@ -84,12 +88,16 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 			return
 		}
 
+		keyHash := ratelimit.HashKey(ratelimit.ExtractAPIKey(c.Request))
+		model := ratelimit.ExtractModel(c)
+
 		entry := &Entry{
 			Timestamp:     time.Now().UTC(),
 			Provider:      provider,
 			Path:          path,
-			Model:         ratelimit.ExtractModel(c),
-			KeyHash:       ratelimit.HashKey(ratelimit.ExtractAPIKey(c.Request)),
+			Role:          "user",
+			Model:         model,
+			KeyHash:       keyHash,
 			Client:        client.Name,
 			ClientVersion: client.Version,
 			SessionID:     client.SessionID,
@@ -99,9 +107,47 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 			BodyTruncated: peek.Truncated,
 		}
 
+		// Install the response capturer BEFORE c.Next() so the wrapper sees
+		// every Write the downstream handler emits. Skipped entirely when
+		// assistant logging is off: avoids any allocation on the hot path.
+		var capturer *responseCapturer
+		if cfg.LogAssistantResponse && cfg.MaxResponseBytes > 0 {
+			capturer = newResponseCapturer(c.Writer, cfg.MaxResponseBytes)
+			c.Writer = capturer
+		}
+
 		c.Next()
 
-		entry.Status = c.Writer.Status()
+		status := c.Writer.Status()
+		entry.Status = status
 		writer.Submit(entry)
+
+		// Only build an assistant entry when the response is plausibly a
+		// model reply. 2xx bodies cover both streaming SSE (status 200, body
+		// is the event stream) and non-streaming JSON. Errors carry no
+		// useful assistant content for offline analysis.
+		if capturer == nil || status < 200 || status >= 300 {
+			return
+		}
+		respBlocks := parseAssistantResponse(capturer.Body(), provider, cfg.MaxTextBytes)
+		if len(respBlocks) == 0 {
+			return
+		}
+		writer.Submit(&Entry{
+			Timestamp:     time.Now().UTC(),
+			Provider:      provider,
+			Path:          path,
+			Status:        status,
+			Role:          "assistant",
+			Model:         model,
+			KeyHash:       keyHash,
+			Client:        client.Name,
+			ClientVersion: client.Version,
+			SessionID:     client.SessionID,
+			CWD:           cwd,
+			Prompt:        joinPromptText(respBlocks),
+			Blocks:        respBlocks,
+			BodyTruncated: capturer.Truncated(),
+		})
 	}
 }

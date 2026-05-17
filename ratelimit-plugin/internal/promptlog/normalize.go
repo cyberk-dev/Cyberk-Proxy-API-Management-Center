@@ -14,6 +14,17 @@ import (
 // log file stays small and free of base64 blobs; text is kept verbatim up to
 // MaxTextBytes and middle-truncated past that so the user's intent (typically
 // at the start and end of long pastes) survives.
+//
+// Tool blocks (tool_use / tool_result, plus Gemini's functionCall /
+// functionResponse) are reference-only: Tool carries the tool name, Bytes /
+// SHA256 cover the raw input or content body, and IsError flags tool_result
+// failures. The full payload is never copied into the log — the point is to
+// make agent-loop activity observable without ballooning storage.
+//
+// Bytes semantics depend on Type:
+//   - text: byte length of the (possibly truncated) text
+//   - image/document/audio: size of the decoded binary payload
+//   - tool_use / tool_result: size of the JSON input / content body
 type Block struct {
 	Type      string `json:"type"`
 	Text      string `json:"text,omitempty"`
@@ -23,12 +34,17 @@ type Block struct {
 	URL       string `json:"url,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
 	OrigBytes int    `json:"orig_bytes,omitempty"`
+	Tool      string `json:"tool,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
 }
 
-// truncateText middle-truncates s when it exceeds max bytes, keeping the first
-// and last halves and inserting a marker. Truncation respects UTF-8 rune
-// boundaries so we never produce invalid encoding in the log. Returns the
-// (possibly trimmed) text, a flag, and the original byte length.
+// truncateText head+tail-truncates s when it exceeds max bytes, keeping the
+// first and last halves and inserting a marker for the elided middle. The
+// head and tail are where intent and conclusion typically live, so this
+// preserves grep-ability of long pastes while cutting their bulk.
+// Truncation respects UTF-8 rune boundaries so the log never contains
+// invalid encoding. Returns the (possibly trimmed) text, a flag, and the
+// original byte length.
 func truncateText(s string, max int) (string, bool, int) {
 	orig := len(s)
 	if max <= 0 || orig <= max {
@@ -37,7 +53,7 @@ func truncateText(s string, max int) (string, bool, int) {
 	half := max / 2
 	head := truncateAtRune(s, half)
 	tail := truncateAtRuneFromEnd(s, half)
-	marker := fmt.Sprintf("\n...[truncated %d bytes]...\n", orig-len(head)-len(tail))
+	marker := fmt.Sprintf("\n...[elided %d bytes]...\n", orig-len(head)-len(tail))
 	return head + marker + tail, true, orig
 }
 
@@ -70,6 +86,27 @@ func truncateAtRuneFromEnd(s string, n int) string {
 		start++
 	}
 	return s[start:]
+}
+
+// hashRaw returns (byte length, short-sha256) for an arbitrary raw byte slice.
+// Used for tool_use input bodies and tool_result content bodies so the log
+// captures fingerprint + size without copying the payload itself.
+func hashRaw(raw []byte) (int, string) {
+	if len(raw) == 0 {
+		return 0, ""
+	}
+	return len(raw), sha256First8(raw)
+}
+
+// sha256First8 returns the hex-encoded first 8 bytes of sha256(raw). Same
+// truncation as maskBase64 / hashRaw so all fingerprints in the log live in
+// the same 16-hex-char namespace.
+func sha256First8(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 // maskBase64 takes a base64-encoded payload, decodes it to measure size and

@@ -50,16 +50,36 @@ function getErrorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
-function summarizeBlock(b: { type: string; text?: string; media_type?: string; bytes?: number; sha256?: string; url?: string }): string {
+function summarizeBlock(b: {
+  type: string;
+  text?: string;
+  media_type?: string;
+  bytes?: number;
+  sha256?: string;
+  url?: string;
+  truncated?: boolean;
+  orig_bytes?: number;
+  tool?: string;
+  is_error?: boolean;
+}): string {
   if (b.type === 'text') {
-    const t = b.text ?? '';
-    return t.length > 80 ? `text: ${t.slice(0, 80)}…` : `text: ${t}`;
+    // text content lives in `prompt` — block only carries length/truncation
+    // metadata. When a small legacy entry still has inline text, show it.
+    if (b.text) {
+      return b.text.length > 80 ? `text: ${b.text.slice(0, 80)}…` : `text: ${b.text}`;
+    }
+    const size = typeof b.bytes === 'number' ? `${b.bytes}B` : '?';
+    return b.truncated && b.orig_bytes
+      ? `text · ${size} (head+tail of ${b.orig_bytes}B)`
+      : `text · ${size}`;
   }
   const parts = [b.type];
+  if (b.tool) parts.push(b.tool);
   if (b.media_type) parts.push(b.media_type);
   if (typeof b.bytes === 'number') parts.push(`${b.bytes}B`);
   if (b.sha256) parts.push(`sha256=${b.sha256}`);
   if (b.url) parts.push(b.url);
+  if (b.is_error) parts.push('error');
   return parts.join(' · ');
 }
 
@@ -77,6 +97,7 @@ export function PromptsPage() {
   const [detailError, setDetailError] = useState('');
 
   const [expandedCWDs, setExpandedCWDs] = useState<Set<string>>(new Set());
+  const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
   const [selectedMessage, setSelectedMessage] = useState<PromptMessage | null>(null);
   const [selectedSession, setSelectedSession] = useState<PromptSession | null>(null);
 
@@ -151,15 +172,26 @@ export function PromptsPage() {
         inlineTemplates,
       });
       setDetail(res);
-      // Expand all CWDs by default for compact overview.
+      // Expand all CWDs by default for compact overview; keep sessions
+      // collapsed so the user sees one title row per session instead of
+      // the full message list.
       setExpandedCWDs(new Set(res.groups.map((g) => g.cwd)));
+      setExpandedSessions(new Set());
+      // Prewarm template cache for each session's first message so the
+      // collapsed title shows a human label instead of a bare hash.
+      for (const g of res.groups) {
+        for (const s of g.sessions) {
+          const h = s.messages[0]?.prompt_template;
+          if (h) void fetchTemplate(h);
+        }
+      }
     } catch (err) {
       setDetail(null);
       setDetailError(getErrorMessage(err, t('notification.refresh_failed')));
     } finally {
       setDetailLoading(false);
     }
-  }, [t, inlineTemplates]);
+  }, [t, inlineTemplates, fetchTemplate]);
 
   const handleRefresh = useCallback(async () => {
     await loadUsers();
@@ -195,6 +227,17 @@ export function PromptsPage() {
       const next = new Set(prev);
       if (next.has(cwd)) next.delete(cwd);
       else next.add(cwd);
+      return next;
+    });
+  };
+
+  const sessionKey = (cwd: string, sid: string) => `${cwd}::${sid}`;
+
+  const toggleSession = (key: string) => {
+    setExpandedSessions((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   };
@@ -359,66 +402,101 @@ export function PromptsPage() {
                       </button>
                       {open && (
                         <div className={styles.sessionList}>
-                          {group.sessions.map((sess) => (
-                            <div key={sess.session_id} className={styles.sessionCard}>
-                              <div className={styles.sessionHead}>
-                                <span className={styles.badge}>{sess.client || 'unknown'}</span>
-                                {sess.client_version && (
-                                  <span className={styles.badge}>{sess.client_version}</span>
+                          {group.sessions.map((sess) => {
+                            const skey = sessionKey(group.cwd, sess.session_id);
+                            const sessOpen = expandedSessions.has(skey);
+                            const firstMsg = sess.messages[0];
+                            const firstTplHash = firstMsg?.prompt_template;
+                            const firstTpl = firstTplHash ? templateCache[firstTplHash] : undefined;
+                            const firstSuffix = (firstMsg?.prompt ?? '').replace(/\s+/g, ' ').trim();
+                            const titleText =
+                              firstSuffix ||
+                              (firstTplHash ? `📋 ${firstTpl?.label || firstTplHash}` : '(no messages)');
+                            return (
+                              <div key={sess.session_id} className={styles.sessionCard}>
+                                <button
+                                  type="button"
+                                  className={styles.sessionToggle}
+                                  onClick={() => toggleSession(skey)}
+                                  title={sess.session_id}
+                                >
+                                  <span className={`${styles.chevron} ${styles.chevronSm} ${sessOpen ? styles.chevronOpen : ''}`}>
+                                    <IconChevronDown size={10} />
+                                  </span>
+                                  <span className={styles.sessionTitle}>{titleText}</span>
+                                  <span className={styles.badge}>{sess.message_count}m</span>
+                                  <span className={styles.sessionTime}>
+                                    {relativeTime(sess.last_seen)}
+                                  </span>
+                                </button>
+                                {sessOpen && (
+                                  <>
+                                    <div className={styles.sessionHead}>
+                                      <span className={styles.badge}>{sess.client || 'unknown'}</span>
+                                      {sess.client_version && (
+                                        <span className={styles.badge}>{sess.client_version}</span>
+                                      )}
+                                      {sess.models.map((m) => (
+                                        <span key={m} className={styles.badge}>{m}</span>
+                                      ))}
+                                      <span className={styles.sessionId} title={sess.session_id}>
+                                        {sess.session_id}
+                                      </span>
+                                    </div>
+                                    <div className={styles.messageList}>
+                                      {sess.messages.map((msg) => {
+                                        const key = messageKey(sess.session_id, msg.ts);
+                                        const isSelected = key === selectedMessageKey;
+                                        const tplHash = msg.prompt_template;
+                                        const tpl = tplHash ? templateCache[tplHash] : undefined;
+                                        const tplLabel = tpl?.label;
+                                        const tplLen = tpl?.len;
+                                        const suffix = (msg.prompt ?? '').replace(/\s+/g, ' ');
+                                        // Empty / unset role is treated as "user" so legacy
+                                        // logs (written before assistant capture existed)
+                                        // still get the prominent rail.
+                                        const isAssistant = msg.role === 'assistant';
+                                        const roleClass = isAssistant ? styles.assistantMsg : styles.userMsg;
+                                        return (
+                                          <button
+                                            key={key}
+                                            type="button"
+                                            className={`${styles.messageRow} ${roleClass} ${isSelected ? styles.selectedMsg : ''}`}
+                                            onClick={() => handleSelectMessage(sess, msg)}
+                                          >
+                                            <span className={styles.msgTime}>{timeOfDay(msg.ts)}</span>
+                                            <span className={styles.msgModel}>{msg.model || '—'}</span>
+                                            <span className={styles.msgText}>
+                                              <span className={`${styles.roleBadge} ${isAssistant ? '' : styles.roleBadgeUser}`}>
+                                                {isAssistant ? 'AI' : 'YOU'}
+                                              </span>
+                                              {tplHash && (
+                                                <span className={styles.tplChip} title={tpl?.text || `template ${tplHash}`}>
+                                                  {tplLabel ? `📋 ${tplLabel}` : `📋 ${tplHash}`}
+                                                  {tplLen ? ` · ${tplLen}c` : ''}
+                                                </span>
+                                              )}
+                                              {suffix.slice(0, 200) || (tplHash ? '' : '(empty)')}
+                                            </span>
+                                            <span className={`${styles.msgStatus} ${statusClass(msg.status)}`}>
+                                              {msg.status || ''}
+                                            </span>
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                    {sess.truncated && (
+                                      <div className={styles.truncBanner}>
+                                        {t('prompts_page.session_truncated', {
+                                          defaultValue: 'Older messages truncated — increase limit to see more.',
+                                        })}
+                                      </div>
+                                    )}
+                                  </>
                                 )}
-                                {sess.models.map((m) => (
-                                  <span key={m} className={styles.badge}>{m}</span>
-                                ))}
-                                <span className={styles.sessionId} title={sess.session_id}>
-                                  {sess.session_id}
-                                </span>
-                                <span className={styles.sessionTime}>
-                                  {relativeTime(sess.last_seen)}
-                                </span>
                               </div>
-                              <div className={styles.messageList}>
-                                {sess.messages.map((msg) => {
-                                  const key = messageKey(sess.session_id, msg.ts);
-                                  const isSelected = key === selectedMessageKey;
-                                  const tplHash = msg.prompt_template;
-                                  const tpl = tplHash ? templateCache[tplHash] : undefined;
-                                  const tplLabel = tpl?.label;
-                                  const tplLen = tpl?.len;
-                                  const suffix = (msg.prompt ?? '').replace(/\s+/g, ' ');
-                                  return (
-                                    <button
-                                      key={key}
-                                      type="button"
-                                      className={`${styles.messageRow} ${isSelected ? styles.selectedMsg : ''}`}
-                                      onClick={() => handleSelectMessage(sess, msg)}
-                                    >
-                                      <span className={styles.msgTime}>{timeOfDay(msg.ts)}</span>
-                                      <span className={styles.msgModel}>{msg.model || '—'}</span>
-                                      <span className={styles.msgText}>
-                                        {tplHash && (
-                                          <span className={styles.tplChip} title={tpl?.text || `template ${tplHash}`}>
-                                            {tplLabel ? `📋 ${tplLabel}` : `📋 ${tplHash}`}
-                                            {tplLen ? ` · ${tplLen}c` : ''}
-                                          </span>
-                                        )}
-                                        {suffix.slice(0, 200) || (tplHash ? '' : '(empty)')}
-                                      </span>
-                                      <span className={`${styles.msgStatus} ${statusClass(msg.status)}`}>
-                                        {msg.status || ''}
-                                      </span>
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                              {sess.truncated && (
-                                <div className={styles.truncBanner}>
-                                  {t('prompts_page.session_truncated', {
-                                    defaultValue: 'Older messages truncated — increase limit to see more.',
-                                  })}
-                                </div>
-                              )}
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>

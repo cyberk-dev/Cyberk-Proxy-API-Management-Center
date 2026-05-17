@@ -67,18 +67,68 @@ func TestExtract_AnthropicArrayContent_WithImage(t *testing.T) {
 	}
 }
 
-func TestExtract_AnthropicSkipToolBlocks(t *testing.T) {
+func TestExtract_AnthropicToolBlocksReferenceOnly(t *testing.T) {
+	// Tool blocks alongside text become reference-only entries (type + size +
+	// hash). The text block stays verbatim. tool_result content is never
+	// copied into the log — only its fingerprint.
 	body := []byte(`{
 		"messages": [
 			{"role": "user", "content": [
-				{"type": "tool_result", "tool_use_id": "x", "content": "result"},
+				{"type": "tool_result", "tool_use_id": "x", "content": "result", "is_error": true},
 				{"type": "text", "text": "follow-up"}
 			]}
 		]
 	}`)
 	blocks := extractBlocks(body, ProviderAnthropic, 1000)
-	if len(blocks) != 1 || blocks[0].Text != "follow-up" {
-		t.Fatalf("expected tool_result dropped, got %+v", blocks)
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks, got %+v", blocks)
+	}
+	if blocks[0].Type != "tool_result" || !blocks[0].IsError || blocks[0].SHA256 == "" || blocks[0].Bytes == 0 {
+		t.Errorf("tool_result reference: %+v", blocks[0])
+	}
+	if blocks[0].Text != "" {
+		t.Errorf("tool_result must NOT carry content text, got %q", blocks[0].Text)
+	}
+	if blocks[1].Type != "text" || blocks[1].Text != "follow-up" {
+		t.Errorf("text: %+v", blocks[1])
+	}
+}
+
+func TestExtract_AnthropicToolUseReference(t *testing.T) {
+	body := []byte(`{
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "tool_use", "id": "u1", "name": "Read", "input": {"file_path": "/x.go", "limit": 200}},
+				{"type": "text", "text": "next step"}
+			]}
+		]
+	}`)
+	blocks := extractBlocks(body, ProviderAnthropic, 1000)
+	if len(blocks) != 2 {
+		t.Fatalf("got %+v", blocks)
+	}
+	if blocks[0].Type != "tool_use" || blocks[0].Tool != "Read" || blocks[0].SHA256 == "" {
+		t.Errorf("tool_use reference: %+v", blocks[0])
+	}
+}
+
+func TestExtract_AnthropicSkipsToolOnlyTurn(t *testing.T) {
+	// Pure agent-loop continuation (no text from the user) — middleware-level
+	// isToolOnly check rejects it so we keep entry count low. extractBlocks
+	// itself still returns the reference-only blocks; the skip is policy.
+	body := []byte(`{
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "x", "content": "result"}
+			]}
+		]
+	}`)
+	blocks := extractBlocks(body, ProviderAnthropic, 1000)
+	if len(blocks) != 1 || blocks[0].Type != "tool_result" {
+		t.Fatalf("expected single tool_result reference, got %+v", blocks)
+	}
+	if !isToolOnly(blocks) {
+		t.Errorf("isToolOnly should be true for tool-only blocks: %+v", blocks)
 	}
 }
 
@@ -204,18 +254,28 @@ func TestExtract_GeminiMissingRoleTreatedAsUser(t *testing.T) {
 	}
 }
 
-func TestExtract_GeminiSkipsFunctionCalls(t *testing.T) {
+func TestExtract_GeminiFunctionCallsReferenceOnly(t *testing.T) {
+	// Gemini functionResponse becomes a tool_result reference; its
+	// `response` body is fingerprinted but never copied. functionCall is
+	// also emitted as tool_use even though it appears in user-role parts
+	// rarely — the symmetry keeps offline analysis simple.
 	body := []byte(`{
 		"contents": [
 			{"role": "user", "parts": [
-				{"functionResponse": {"name": "x", "response": {}}},
+				{"functionResponse": {"name": "getWeather", "response": {"temp": 72}}},
 				{"text": "ok"}
 			]}
 		]
 	}`)
 	blocks := extractBlocks(body, ProviderGemini, 1000)
-	if len(blocks) != 1 || blocks[0].Text != "ok" {
+	if len(blocks) != 2 {
 		t.Fatalf("got %+v", blocks)
+	}
+	if blocks[0].Type != "tool_result" || blocks[0].Tool != "getWeather" || blocks[0].SHA256 == "" {
+		t.Errorf("tool_result ref: %+v", blocks[0])
+	}
+	if blocks[1].Text != "ok" {
+		t.Errorf("text: %+v", blocks[1])
 	}
 }
 

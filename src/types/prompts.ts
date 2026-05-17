@@ -17,6 +17,12 @@ export interface PromptUsersResponse {
 
 export interface PromptBlock {
   type: string;
+  /**
+   * Only present on legacy entries written before 2026-05-17. Newer entries
+   * carry text content in {@link PromptMessage.prompt} and leave this empty;
+   * use {@link bytes} for length and {@link truncated} / {@link orig_bytes}
+   * for head+tail-elided originals.
+   */
   text?: string;
   media_type?: string;
   bytes?: number;
@@ -24,6 +30,10 @@ export interface PromptBlock {
   url?: string;
   truncated?: boolean;
   orig_bytes?: number;
+  /** Name of the tool for tool_use / tool_result reference blocks. */
+  tool?: string;
+  /** True when a tool_result was returned with is_error=true. */
+  is_error?: boolean;
 }
 
 export interface PromptMessage {
@@ -31,6 +41,12 @@ export interface PromptMessage {
   model?: string;
   provider?: string;
   status: number;
+  /**
+   * Authoring role: `"user"` for a captured prompt, `"assistant"` for the
+   * upstream model reply. Absent on legacy entries written before
+   * assistant-side logging existed — treat empty as `"user"`.
+   */
+  role?: 'user' | 'assistant';
   prompt: string;
   /**
    * Hash of a registered prompt template (see /v0/management/prompts/templates).
