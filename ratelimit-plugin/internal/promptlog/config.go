@@ -21,12 +21,16 @@ const (
 	// (which dominate disk usage) while leaving typical prompts untouched.
 	defaultMaxTextBytes = 4 * 1024
 	// defaultMaxResponseBytes caps the buffered upstream response per
-	// request. 256 KiB comfortably holds a non-streaming model reply plus a
-	// page or two of SSE deltas; beyond that the wrapper stops buffering
-	// (the response still streams to the client unaffected) and the entry
-	// is marked Truncated. Sized to keep promptlog memory bounded under
-	// hundreds of concurrent in-flight chat-completion calls.
-	defaultMaxResponseBytes = 256 * 1024
+	// request. 2 MiB is tuned to fit gpt-5.5 / o-series reasoning streams
+	// whose first hundreds of KiB are typically `reasoning_summary_text.delta`
+	// frames — at 256 KiB the buffer overflowed before any
+	// `response.output_text.delta` arrived and the assistant entry was
+	// silently dropped (parser returned zero blocks). At 2 MiB per request
+	// the worst-case memory ceiling for ~200 concurrent streams is ~400 MB,
+	// which the proxy already provisions for. Beyond cap the wrapper stops
+	// buffering (the response still streams to the client unaffected) and
+	// the entry is marked Truncated.
+	defaultMaxResponseBytes = 2 * 1024 * 1024
 	defaultQueueSize        = 1024
 	defaultDirName          = "prompts"
 

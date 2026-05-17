@@ -424,8 +424,25 @@ func parseOpenAIResponsesSSE(body []byte, maxText int) []Block {
 		switch j.Get("type").String() {
 		case "response.output_text.delta":
 			textSB.WriteString(j.Get("delta").String())
-		case "response.reasoning_summary_text.delta", "response.reasoning.delta":
+		case "response.refusal.delta":
+			// Model refused; record as text so the UI shows the refusal
+			// message alongside any other captured content.
+			textSB.WriteString(j.Get("delta").String())
+		case "response.reasoning_summary_text.delta",
+			"response.reasoning.delta",
+			"response.reasoning_text.delta":
+			// gpt-5.5 emits reasoning content under several event names
+			// depending on the API revision; treat them as one stream.
 			thinkSB.WriteString(j.Get("delta").String())
+		case "response.content_part.added":
+			// Some streams ship the first chunk of text in the
+			// content_part.added event itself rather than via a
+			// separate output_text.delta. Capture it so the assistant
+			// entry has content even when later deltas were truncated.
+			part := j.Get("part")
+			if t := part.Get("text"); t.Exists() {
+				textSB.WriteString(t.String())
+			}
 		case "response.function_call_arguments.delta":
 			id := j.Get("item_id").String()
 			cur, ok := fcs[id]
@@ -437,7 +454,8 @@ func parseOpenAIResponsesSSE(body []byte, maxText int) []Block {
 			cur.args.WriteString(j.Get("delta").String())
 		case "response.output_item.added":
 			item := j.Get("item")
-			if item.Get("type").String() == "function_call" {
+			t := item.Get("type").String()
+			if t == "function_call" {
 				id := item.Get("id").String()
 				if id == "" {
 					id = item.Get("call_id").String()
@@ -446,6 +464,16 @@ func parseOpenAIResponsesSSE(body []byte, maxText int) []Block {
 					fcs[id] = &fc{name: item.Get("name").String()}
 					fcOrder = append(fcOrder, id)
 				}
+			}
+			// Message items sometimes carry preliminary text in their
+			// content array; pull any output_text shards we can.
+			if t == "message" {
+				item.Get("content").ForEach(func(_, p gjson.Result) bool {
+					if p.Get("type").String() == "output_text" {
+						textSB.WriteString(p.Get("text").String())
+					}
+					return true
+				})
 			}
 		case "response.completed":
 			// Final snapshot — useful as a fallback when deltas were missed.

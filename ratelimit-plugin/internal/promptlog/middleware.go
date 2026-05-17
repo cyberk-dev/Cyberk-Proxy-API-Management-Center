@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
 )
@@ -131,6 +132,19 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		}
 		respBlocks := parseAssistantResponse(capturer.Body(), provider, cfg.MaxTextBytes)
 		if len(respBlocks) == 0 {
+			// Body had bytes but the per-provider parser couldn't extract
+			// anything. Most often: cap hit before the first usable event,
+			// or upstream emitted an event type we don't yet handle.
+			// Log a single line (head only) so future debugging can match
+			// drops against novel stream shapes.
+			if body := capturer.Body(); len(body) > 0 {
+				head := body
+				if len(head) > 256 {
+					head = head[:256]
+				}
+				log.Warnf("promptlog: assistant parse produced 0 blocks (provider=%s len=%d truncated=%v head=%q)",
+					provider, len(body), capturer.Truncated(), head)
+			}
 			return
 		}
 		writer.Submit(&Entry{
