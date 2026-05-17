@@ -508,9 +508,6 @@ export function PromptsPage() {
                                           >
                                             <span className={styles.msgTime}>{timeOfDay(msg.ts)}</span>
                                             <span className={styles.msgText}>
-                                              <span className={`${styles.roleBadge} ${isAssistant ? '' : styles.roleBadgeUser}`}>
-                                                {isAssistant ? 'AI' : 'YOU'}
-                                              </span>
                                               {tplHash && (
                                                 <span className={styles.tplChip} title={tpl?.text || `template ${tplHash}`}>
                                                   {tplLabel ? `📋 ${tplLabel}` : `📋 ${tplHash}`}

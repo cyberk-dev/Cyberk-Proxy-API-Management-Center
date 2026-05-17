@@ -401,37 +401,19 @@
 
   // Chat-style hierarchy: user prompts are the focus of the page so they
   // keep full contrast and a thin accent rail. Assistant replies are
-  // supporting context — indented, dimmer text, no accent — so the eye
-  // tracks conversation turn-taking without re-reading every model word.
+  // supporting context — indented and dimmer — so the eye tracks
+  // conversation turn-taking by color alone (no role badge needed).
   &.userMsg {
     box-shadow: inset 2px 0 0 var(--accent, #6366f1);
+    .msgText { color: var(--text-primary); font-weight: 500; }
   }
   &.assistantMsg {
     margin-left: $spacing-md;
     padding-left: $spacing-sm;
-    color: var(--text-secondary);
-    opacity: 0.85;
     background: var(--surface-muted, rgba(127, 127, 127, 0.04));
-
     .msgText { color: var(--text-secondary); }
+    .msgTime { opacity: 0.6; }
   }
-}
-
-.roleBadge {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  padding: 1px 5px;
-  border-radius: 4px;
-  margin-right: 4px;
-  vertical-align: middle;
-  background: var(--surface-muted, rgba(127, 127, 127, 0.12));
-  color: var(--text-secondary);
-}
-.roleBadgeUser {
-  background: var(--accent-soft, rgba(99, 102, 241, 0.18));
-  color: var(--accent, #6366f1);
 }
 
 .msgTime {
