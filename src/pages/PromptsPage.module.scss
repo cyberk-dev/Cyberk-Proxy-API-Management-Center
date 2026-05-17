@@ -74,9 +74,12 @@
     &.withDetail {
       grid-template-columns: 1fr;
     }
-    &.collapsedKeys {
-      grid-template-columns: 1fr;
-    }
+    // Mobile intentionally drops `.collapsedKeys` styling: leaving the
+    // single-column 1fr in place would render ONLY the collapsed rail
+    // (which is the only left-slot child) and hide every other column —
+    // a user who collapsed on desktop and opened on mobile would be
+    // locked out of the sessions view. Stacking naturally with the rail
+    // visible is fine; the rail still holds the expand toggle.
   }
 }
 

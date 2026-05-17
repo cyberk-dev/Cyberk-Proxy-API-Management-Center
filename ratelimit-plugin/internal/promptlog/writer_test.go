@@ -135,6 +135,54 @@ func TestWriter_StripsBlockTextBeforeEncode(t *testing.T) {
 	}
 }
 
+func TestWriter_SkipsTemplatingForAssistantEntries(t *testing.T) {
+	// An assistant entry whose Prompt opens with an inlined tool-block
+	// header must NOT (a) get template-matched against user-prompt
+	// templates or (b) be observed by the detector. Without this gate the
+	// detector would auto-register "[tool_use Bash 234B]\n..." prefixes as
+	// templates, and Match() would attempt to splice user-shape templates
+	// onto assistant text — both nonsensical.
+	dir := t.TempDir()
+	tpl, err := NewTemplateStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed a template whose body happens to match a possible assistant
+	// preamble — if the gate is missing, the assistant entry would
+	// template-match against this and lose its Prompt prefix.
+	_, err = tpl.Register("Here is the answer.", "preloaded", time.Date(2026, 5, 17, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWriter(dir, 8, tpl, TemplatesConfig{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	ts := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	w.Submit(&Entry{
+		Timestamp: ts,
+		Role:      "assistant",
+		Provider:  ProviderAnthropic,
+		Path:      "/v1/messages",
+		Prompt:    "Here is the answer.",
+		Blocks:    []Block{{Type: "text", Text: "Here is the answer."}},
+	})
+	w.Close()
+
+	entries := readDailyFile(t, dir, "2026-05-17")
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries", len(entries))
+	}
+	if tpl, ok := entries[0]["prompt_template"]; ok && tpl != nil && tpl != "" {
+		t.Errorf("assistant entry must not get prompt_template set, got %v", tpl)
+	}
+	if entries[0]["prompt"] != "Here is the answer." {
+		t.Errorf("assistant prompt must not be templated/shortened, got %v", entries[0]["prompt"])
+	}
+}
+
 func TestWriter_SubmitAfterClose(t *testing.T) {
 	dir := t.TempDir()
 	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})

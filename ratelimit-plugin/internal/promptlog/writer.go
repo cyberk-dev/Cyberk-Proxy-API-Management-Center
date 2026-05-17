@@ -225,14 +225,23 @@ func (w *Writer) run() {
 			// Prompt land in the JSONL line. Detector observes the original
 			// (untemplated) prompt to find new patterns; ordering matters
 			// only for the entry written to disk.
-			if w.detector != nil {
-				w.detector.observe(e.Prompt, ts)
-			}
-			if w.templates != nil {
-				if hash, suffix, hit := w.templates.Match(e.Prompt); hit {
-					e.PromptTemplate = hash
-					e.Prompt = suffix
-					w.templates.Touch(hash, ts)
+			//
+			// Assistant entries skip both paths: their Prompt opens with
+			// inlined tool-block bracket headers ("[tool_use Bash 1.2KiB]\n…"),
+			// which would (a) prevent legitimate user-prompt templates from
+			// matching, and (b) cause the detector to auto-register those
+			// bracket prefixes as new templates, polluting templates.jsonl.
+			// Templating is a user-prompt-shape feature; keep it scoped there.
+			if e.Role != "assistant" {
+				if w.detector != nil {
+					w.detector.observe(e.Prompt, ts)
+				}
+				if w.templates != nil {
+					if hash, suffix, hit := w.templates.Match(e.Prompt); hit {
+						e.PromptTemplate = hash
+						e.Prompt = suffix
+						w.templates.Touch(hash, ts)
+					}
 				}
 			}
 			// Strip Block.Text on every block whose content already lives in

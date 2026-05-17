@@ -3,6 +3,7 @@ package promptlog
 import (
 	"bufio"
 	"bytes"
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -479,11 +480,14 @@ func parseOpenAIResponsesSSE(body []byte, maxText int) []Block {
 		if len(blocks) == 0 {
 			return finalBlocks
 		}
-		// Dedup key combines tool name with the truncated content prefix.
-		// Two calls that share the same head+tail snippet must have come
-		// from the same arguments (truncation is deterministic), so this
-		// catches the legitimate duplicate without sha256 in the block.
-		dedupKey := func(b Block) string { return b.Tool + "|" + b.Text }
+		// Dedup key combines tool name + original byte length + the
+		// truncated content. Bytes guards against the theoretical case of
+		// two distinct large payloads sharing the same head+tail but
+		// differing in middle bytes — they must also differ in length to
+		// collide, which is far less likely than just-the-ends matching.
+		dedupKey := func(b Block) string {
+			return b.Tool + "|" + strconv.Itoa(b.Bytes) + "|" + b.Text
+		}
 		seen := make(map[string]struct{}, len(blocks))
 		for _, b := range blocks {
 			if b.Type == "tool_use" {
