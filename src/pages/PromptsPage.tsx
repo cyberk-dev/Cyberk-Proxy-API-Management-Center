@@ -195,14 +195,21 @@ export function PromptsPage() {
       // the full message list.
       setExpandedCWDs(new Set(res.groups.map((g) => g.cwd)));
       setExpandedSessions(new Set());
-      // Prewarm template cache for each session's first message so the
-      // collapsed title shows a human label instead of a bare hash.
+      // Prewarm template cache for EVERY message that references a
+      // template, not just the first per session. Without this, clicking
+      // any non-first templated message triggers a cache-miss fetch on
+      // first click — the tplChip then re-renders from the bare hash to
+      // the labeled form, which users perceive as a "reload." Dedup the
+      // hashes so we don't fire N parallel requests for the same body.
+      const tplHashes = new Set<string>();
       for (const g of res.groups) {
         for (const s of g.sessions) {
-          const h = s.messages[0]?.prompt_template;
-          if (h) void fetchTemplate(h);
+          for (const m of s.messages) {
+            if (m.prompt_template) tplHashes.add(m.prompt_template);
+          }
         }
       }
+      for (const h of tplHashes) void fetchTemplate(h);
     } catch (err) {
       setDetail(null);
       setDetailError(getErrorMessage(err, t('notification.refresh_failed')));
@@ -557,6 +564,8 @@ export function PromptsPage() {
               <div className={styles.detailMeta}>
                 <span className={styles.detailMetaKey}>Time</span>
                 <span className={styles.detailMetaVal}>{new Date(selectedMessage.ts).toLocaleString()}</span>
+                <span className={styles.detailMetaKey}>Model</span>
+                <span className={styles.detailMetaVal}>{selectedMessage.model || '—'}</span>
                 <span className={styles.detailMetaKey}>Provider</span>
                 <span className={styles.detailMetaVal}>{selectedMessage.provider || '—'}</span>
                 <span className={styles.detailMetaKey}>Client</span>
