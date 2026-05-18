@@ -531,6 +531,109 @@ func TestBuildDetail_SessionIDWithPipeInCursor(t *testing.T) {
 	}
 }
 
+func TestBuildDetail_MessageBeforePaging(t *testing.T) {
+	// 500 messages in one session. With MessageLimit=200, the initial
+	// load returns the 200 most recent (msgs 300..499). MessageBefore
+	// targeting msg 300's timestamp must return msgs 100..299 (still 200
+	// of the older slice) and report Truncated=true (msgs 0..99 still
+	// older). Another page with cursor on msg 100 returns msgs 0..99 and
+	// reports Truncated=false.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	base := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	entries := make([]Entry, 500)
+	for i := 0; i < 500; i++ {
+		entries[i] = Entry{
+			KeyHash:   hash,
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+			CWD:       "/p",
+			SessionID: "s",
+			Prompt:    "p",
+		}
+	}
+	writeJSONL(t, dir, "2026-05-17", entries...)
+
+	// Initial load: top 200 most recent, Truncated=true.
+	d0, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit: 200, SessionLimit: 200, CWDFilter: "/p", SessionFilter: "s",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess0 := d0.Groups[0].Sessions[0]
+	if len(sess0.Messages) != 200 || sess0.MessageCount != 500 || !sess0.Truncated {
+		t.Fatalf("initial page wrong: msgs=%d count=%d trunc=%v", len(sess0.Messages), sess0.MessageCount, sess0.Truncated)
+	}
+	if !sess0.Messages[0].Timestamp.Equal(base.Add(300 * time.Second)) {
+		t.Errorf("oldest of initial page should be msg 300, got %v", sess0.Messages[0].Timestamp)
+	}
+
+	// Page 2: cursor on msg 300 → return msgs 100..299, still Truncated.
+	d1, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit:  200,
+		CWDFilter:     "/p",
+		SessionFilter: "s",
+		MessageBefore: base.Add(300 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess1 := d1.Groups[0].Sessions[0]
+	if len(sess1.Messages) != 200 || sess1.MessageCount != 500 || !sess1.Truncated {
+		t.Fatalf("page2 wrong: msgs=%d count=%d trunc=%v", len(sess1.Messages), sess1.MessageCount, sess1.Truncated)
+	}
+	if !sess1.Messages[0].Timestamp.Equal(base.Add(100 * time.Second)) {
+		t.Errorf("oldest of page2 should be msg 100, got %v", sess1.Messages[0].Timestamp)
+	}
+	if !sess1.Messages[199].Timestamp.Equal(base.Add(299 * time.Second)) {
+		t.Errorf("newest of page2 should be msg 299, got %v", sess1.Messages[199].Timestamp)
+	}
+
+	// Page 3: cursor on msg 100 → return msgs 0..99, NOT Truncated.
+	d2, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit:  200,
+		CWDFilter:     "/p",
+		SessionFilter: "s",
+		MessageBefore: base.Add(100 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess2 := d2.Groups[0].Sessions[0]
+	if len(sess2.Messages) != 100 || sess2.Truncated {
+		t.Fatalf("page3 wrong: msgs=%d trunc=%v (want 100/false)", len(sess2.Messages), sess2.Truncated)
+	}
+}
+
+func TestBuildDetail_SessionFilterScopesResponse(t *testing.T) {
+	// Two sessions in one CWD. SessionFilter returns just one of them in
+	// Sessions, but SessionCount on the CWDGroup reflects both — so the
+	// UI can still display "1 of 2 sessions".
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	base := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	writeJSONL(t, dir, "2026-05-17",
+		Entry{KeyHash: hash, Timestamp: base, CWD: "/p", SessionID: "s-keep", Prompt: "x"},
+		Entry{KeyHash: hash, Timestamp: base.Add(time.Hour), CWD: "/p", SessionID: "s-drop", Prompt: "x"},
+	)
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit: 200, CWDFilter: "/p", SessionFilter: "s-keep",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 1 {
+		t.Fatalf("groups=%d want 1", len(d.Groups))
+	}
+	g := d.Groups[0]
+	if g.SessionCount != 2 {
+		t.Errorf("SessionCount=%d want 2 (full CWD count)", g.SessionCount)
+	}
+	if len(g.Sessions) != 1 || g.Sessions[0].SessionID != "s-keep" {
+		t.Errorf("expected only s-keep in Sessions, got %+v", g.Sessions)
+	}
+}
+
 func TestBuildDetail_InitialCWDsLazyTrim(t *testing.T) {
 	dir := t.TempDir()
 	hash := ratelimit.HashKey("sk-a")

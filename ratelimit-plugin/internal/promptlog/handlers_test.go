@@ -54,6 +54,26 @@ func TestHandler_SessionBeforeRequiresCwd(t *testing.T) {
 	}
 }
 
+func TestHandler_SessionIDRequiresCwd(t *testing.T) {
+	engine, secret := newReadHandlerRig(t)
+	rr := doReadGet(engine,
+		"/v0/management/prompts/users/sk-x?session_id=abc",
+		secret)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandler_MessageBeforeRequiresSessionID(t *testing.T) {
+	engine, secret := newReadHandlerRig(t)
+	rr := doReadGet(engine,
+		"/v0/management/prompts/users/sk-x?cwd=%2Fp&message_before=2026-05-17T10:00:00Z",
+		secret)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandler_SessionBeforeRejectsHeadersOnly(t *testing.T) {
 	// session_before + headers_only is a client mistake — cursor is
 	// meaningless when no sessions are returned. Surface a specific

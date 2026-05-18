@@ -21,8 +21,11 @@ import styles from './PromptsPage.module.scss';
 const DEFAULT_LIMIT = 200;
 const DEFAULT_SESSION_LIMIT = 200;
 const DEFAULT_INITIAL_CWDS = 20;
+const SESSION_LIMIT_MIN = 1;
+const SESSION_LIMIT_MAX = 500;
 const INLINE_TEMPLATES_STORAGE_KEY = 'prompts.inlineTemplates';
 const KEYS_PANEL_COLLAPSED_STORAGE_KEY = 'prompts.keysPanelCollapsed';
+const SESSION_LIMIT_STORAGE_KEY = 'prompts.sessionLimit';
 
 function relativeTime(iso?: string): string {
   if (!iso) return '—';
@@ -106,6 +109,12 @@ export function PromptsPage() {
   const [loadingMoreCWDs, setLoadingMoreCWDs] = useState<Set<string>>(new Set());
   const [cwdLoadErrors, setCwdLoadErrors] = useState<Record<string, string>>({});
 
+  // Per-session load state for paging older messages within a session.
+  // Keyed by `cwd::sid` (matches the existing sessionKey helper). Same
+  // immutable-Set pattern as the CWD state above.
+  const [loadingMoreMessages, setLoadingMoreMessages] = useState<Set<string>>(new Set());
+  const [messageLoadErrors, setMessageLoadErrors] = useState<Record<string, string>>({});
+
   const [pasteInput, setPasteInput] = useState('');
 
   // Templates: cache fetched bodies by hash so the right-pane "expand" button
@@ -132,6 +141,45 @@ export function PromptsPage() {
       /* localStorage unavailable — preference resets next reload */
     }
   }, []);
+
+  // Sessions-per-CWD knob. Surfaces as a small input next to the inline-
+  // templates toggle so operators can dial pagination without seeding test
+  // data (the default 200 is high enough that most real users never hit
+  // load-more; lowering to e.g. 10 makes the lazy + load-more flow
+  // immediately visible). Persisted per-user via localStorage.
+  const [sessionLimit, setSessionLimit] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(SESSION_LIMIT_STORAGE_KEY);
+      if (raw) {
+        const n = parseInt(raw, 10);
+        if (Number.isFinite(n) && n >= SESSION_LIMIT_MIN && n <= SESSION_LIMIT_MAX) return n;
+      }
+    } catch {
+      /* localStorage unavailable */
+    }
+    return DEFAULT_SESSION_LIMIT;
+  });
+  // Local editing buffer so partial input (e.g. user clearing the box to
+  // retype) doesn't immediately fire a reload with an invalid value.
+  const [sessionLimitDraft, setSessionLimitDraft] = useState<string>(String(sessionLimit));
+  const commitSessionLimit = useCallback((raw: string) => {
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < SESSION_LIMIT_MIN || n > SESSION_LIMIT_MAX) {
+      // Snap back to the committed value on invalid input rather than
+      // applying a clamped one — silent clamping confuses users who
+      // typed e.g. "0" expecting a specific behavior.
+      setSessionLimitDraft(String(sessionLimit));
+      return;
+    }
+    if (n === sessionLimit) return;
+    setSessionLimit(n);
+    setSessionLimitDraft(String(n));
+    try {
+      localStorage.setItem(SESSION_LIMIT_STORAGE_KEY, String(n));
+    } catch {
+      /* localStorage unavailable */
+    }
+  }, [sessionLimit]);
 
   // API-keys panel collapse: same localStorage shape as the templates
   // toggle so per-user preference survives reloads. When collapsed the
@@ -210,11 +258,13 @@ export function PromptsPage() {
     setExpandedTemplateInDetail(false);
     setLoadingMoreCWDs(new Set());
     setCwdLoadErrors({});
+    setLoadingMoreMessages(new Set());
+    setMessageLoadErrors({});
     try {
       const res = await promptsApi.getDetail(keyOrHash, {
         limit: DEFAULT_LIMIT,
         inlineTemplates,
-        sessionLimit: DEFAULT_SESSION_LIMIT,
+        sessionLimit,
         initialCwds: DEFAULT_INITIAL_CWDS,
       });
       setDetail(res);
@@ -236,7 +286,7 @@ export function PromptsPage() {
     } finally {
       setDetailLoading(false);
     }
-  }, [t, inlineTemplates, prewarmTemplates]);
+  }, [t, inlineTemplates, sessionLimit, prewarmTemplates]);
 
   // Fetch one page of sessions for a single CWD. `before` undefined means
   // "first page (most recent)"; otherwise resumes after the given cursor.
@@ -264,7 +314,7 @@ export function PromptsPage() {
       return next;
     });
     try {
-      const res = await promptsApi.loadCWDSessions(keyOrHash, cwd, before, DEFAULT_SESSION_LIMIT);
+      const res = await promptsApi.loadCWDSessions(keyOrHash, cwd, before, sessionLimit);
       const got: PromptCWDGroup | undefined = res.groups[0];
       setDetail((prev) => {
         if (!prev) return prev;
@@ -306,7 +356,86 @@ export function PromptsPage() {
         return next;
       });
     }
-  }, [t, prewarmTemplates]);
+  }, [t, sessionLimit, prewarmTemplates]);
+
+  // Fetch one page of older messages for an expanded session. Anchor
+  // cursor is the oldest currently-loaded message's `ts`. Server returns
+  // strictly-older messages (tied-ts edge documented as a known limit on
+  // the backend); we dedup by `ts` defensively in case a refresh-merge
+  // shifted things underneath. Failure leaves the session intact so the
+  // user can hit Retry without losing scroll position.
+  const fetchOlderMessages = useCallback(async (cwd: string, sid: string) => {
+    if (!selectedKey) return;
+    const skey = `${cwd}::${sid}`;
+    if (loadingMoreMessages.has(skey)) return;
+
+    const group = detail?.groups.find((g) => g.cwd === cwd);
+    const sess = group?.sessions.find((s) => s.session_id === sid);
+    if (!sess || sess.messages.length === 0) return;
+    const oldestTs = sess.messages[0].ts;
+
+    setLoadingMoreMessages((prev) => {
+      if (prev.has(skey)) return prev;
+      const next = new Set(prev);
+      next.add(skey);
+      return next;
+    });
+    setMessageLoadErrors((prev) => {
+      if (!prev[skey]) return prev;
+      const next: Record<string, string> = {};
+      for (const k of Object.keys(prev)) {
+        if (k !== skey) next[k] = prev[k];
+      }
+      return next;
+    });
+
+    try {
+      const res = await promptsApi.loadOlderMessages(selectedKey, cwd, sid, oldestTs, DEFAULT_LIMIT);
+      const got = res.groups[0]?.sessions[0];
+      setDetail((prev) => {
+        if (!prev) return prev;
+        // Stale-key guard — same reason as the CWD-level fetchers.
+        if (res.key_hash !== prev.key_hash) return prev;
+        const gIdx = prev.groups.findIndex((g) => g.cwd === cwd);
+        if (gIdx < 0) return prev;
+        const sIdx = prev.groups[gIdx].sessions.findIndex((s) => s.session_id === sid);
+        if (sIdx < 0) return prev;
+        const existingSess = prev.groups[gIdx].sessions[sIdx];
+        if (!got) {
+          // Server returned no session — usually means cursor walked past
+          // the start. Just clear `truncated` so the button hides.
+          const sessions = prev.groups[gIdx].sessions.slice();
+          sessions[sIdx] = { ...existingSess, truncated: false };
+          const groups = prev.groups.slice();
+          groups[gIdx] = { ...prev.groups[gIdx], sessions };
+          return { ...prev, groups };
+        }
+        const seen = new Set(existingSess.messages.map((m) => m.ts));
+        const older = got.messages.filter((m) => !seen.has(m.ts));
+        const sessions = prev.groups[gIdx].sessions.slice();
+        sessions[sIdx] = {
+          ...existingSess,
+          messages: [...older, ...existingSess.messages],
+          // Server's truncated flag is the source of truth post-merge.
+          truncated: got.truncated ?? false,
+        };
+        const groups = prev.groups.slice();
+        groups[gIdx] = { ...prev.groups[gIdx], sessions };
+        return { ...prev, groups };
+      });
+      if (got) prewarmTemplates([got]);
+    } catch (err) {
+      const msg = getErrorMessage(err, t('notification.refresh_failed'));
+      setMessageLoadErrors((prev) => ({ ...prev, [skey]: msg }));
+    } finally {
+      setLoadingMoreMessages((prev) => {
+        if (!prev.has(skey)) return prev;
+        const next = new Set(prev);
+        next.delete(skey);
+        return next;
+      });
+    }
+  }, [selectedKey, detail, loadingMoreMessages, t, prewarmTemplates]);
 
   const handleRefresh = useCallback(async () => {
     await loadUsers();
@@ -483,6 +612,24 @@ export function PromptsPage() {
             {t('prompts_page.inline_templates', {
               defaultValue: 'Show templates inline (server-side splice)',
             })}
+          </label>
+          <label className={styles.toggleLabel}>
+            {t('prompts_page.sessions_per_cwd', { defaultValue: 'Sessions per CWD' })}
+            <input
+              type="number"
+              min={SESSION_LIMIT_MIN}
+              max={SESSION_LIMIT_MAX}
+              value={sessionLimitDraft}
+              onChange={(e) => setSessionLimitDraft(e.target.value)}
+              onBlur={(e) => commitSessionLimit(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  commitSessionLimit((e.target as HTMLInputElement).value);
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+              className={styles.limitInput}
+            />
           </label>
         </div>
       </div>
@@ -666,6 +813,48 @@ export function PromptsPage() {
                                       </span>
                                     </div>
                                     <div className={styles.messageList}>
+                                      {sess.truncated && (() => {
+                                        const skey = sessionKey(group.cwd, sess.session_id);
+                                        const loading = loadingMoreMessages.has(skey);
+                                        const err = messageLoadErrors[skey];
+                                        const remaining = Math.max(
+                                          0,
+                                          sess.message_count - sess.messages.length
+                                        );
+                                        if (loading) {
+                                          return (
+                                            <div className={styles.cwdLoading}>
+                                              <LoadingSpinner />
+                                            </div>
+                                          );
+                                        }
+                                        if (err) {
+                                          return (
+                                            <div className={styles.cwdError}>
+                                              <span>{err}</span>
+                                              <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => fetchOlderMessages(group.cwd, sess.session_id)}
+                                              >
+                                                {t('prompts_page.retry', { defaultValue: 'Retry' })}
+                                              </Button>
+                                            </div>
+                                          );
+                                        }
+                                        return (
+                                          <button
+                                            type="button"
+                                            className={styles.loadMoreRow}
+                                            onClick={() => fetchOlderMessages(group.cwd, sess.session_id)}
+                                          >
+                                            {t('prompts_page.load_older_messages', {
+                                              defaultValue: 'Load older messages ({{n}} more)',
+                                              n: remaining,
+                                            })}
+                                          </button>
+                                        );
+                                      })()}
                                       {sess.messages.map((msg) => {
                                         const key = messageKey(sess.session_id, msg.ts);
                                         const isSelected = key === selectedMessageKey;
@@ -700,13 +889,6 @@ export function PromptsPage() {
                                         );
                                       })}
                                     </div>
-                                    {sess.truncated && (
-                                      <div className={styles.truncBanner}>
-                                        {t('prompts_page.session_truncated', {
-                                          defaultValue: 'Older messages truncated — increase limit to see more.',
-                                        })}
-                                      </div>
-                                    )}
                                   </>
                                 )}
                               </div>

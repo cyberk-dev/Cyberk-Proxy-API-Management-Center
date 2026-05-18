@@ -624,6 +624,26 @@
   cursor: pointer;
 }
 
+// Inline numeric knob next to the toggle labels. Narrow because the
+// values it accepts are small (1-500). Avoids the full Input component
+// styling so it lines up with the checkbox in headerActions.
+.limitInput {
+  width: 64px;
+  padding: 2px $spacing-xs;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--surface-secondary, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  text-align: right;
+
+  &:focus {
+    outline: none;
+    border-color: var(--accent, #6366f1);
+  }
+}
+
 .tplChip {
   display: inline-block;
   padding: 1px 6px;

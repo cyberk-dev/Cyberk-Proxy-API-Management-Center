@@ -119,6 +119,29 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 		}
 		opts.CWDFilter = strings.TrimSpace(c.Query("cwd"))
 		opts.HeadersOnly = c.Query("headers_only") == "1" || c.Query("headers_only") == "true"
+		opts.SessionFilter = strings.TrimSpace(c.Query("session_id"))
+		if opts.SessionFilter != "" && opts.CWDFilter == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "session_id requires cwd"})
+			return
+		}
+		if mbRaw := strings.TrimSpace(c.Query("message_before")); mbRaw != "" {
+			if opts.SessionFilter == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "message_before requires session_id"})
+				return
+			}
+			if opts.HeadersOnly {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "message_before is meaningless with headers_only"})
+				return
+			}
+			mb, err := time.Parse(time.RFC3339Nano, mbRaw)
+			if err != nil {
+				if mb, err = time.Parse(time.RFC3339, mbRaw); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "message_before not RFC3339"})
+					return
+				}
+			}
+			opts.MessageBefore = mb
+		}
 
 		// session_before is composite: "<RFC3339>|<session_id>". Strict-
 		// less-than on timestamp alone would drop sessions tied at the

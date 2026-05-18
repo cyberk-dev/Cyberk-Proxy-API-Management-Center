@@ -269,6 +269,18 @@ type DetailOpts struct {
 	// strictly older than the cursor. Only meaningful with CWDFilter set
 	// (the handler rejects otherwise).
 	SessionBefore *SessionCursor
+	// SessionFilter, when non-empty, restricts the response Sessions
+	// array to just the matching session. CWD-level meta (SessionCount,
+	// MessageCount) is still computed from the full CWD aggregate so the
+	// caller can still display "1 of N sessions". Requires CWDFilter.
+	SessionFilter string
+	// MessageBefore, when non-zero, drops messages with timestamp not
+	// strictly older. Used to page older messages within a single session.
+	// Requires SessionFilter (cursor is meaningless across sessions: two
+	// sessions can share a timestamp). Tied per-session timestamps are
+	// rare in practice but if two messages share ts exactly, the older
+	// one may be lost on the page boundary — documented limitation.
+	MessageBefore time.Time
 	// HeadersOnly leaves every group's Sessions as an empty slice while
 	// still computing SessionCount and HasMore from the full aggregate.
 	// Used by the refresh button so it can update meta without clobbering
@@ -381,7 +393,15 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 		firstSeen     time.Time
 		lastSeen      time.Time
 		msgs          []Message
-		total         int
+		// total counts every entry for this session, regardless of filters.
+		// Drives MessageCount in the response so the UI can show "X of Y"
+		// even when a cursor narrows the returned window.
+		total int
+		// eligibleCount counts entries that survived MessageBefore filtering.
+		// Truncated is `eligibleCount > len(msgs)` — answers "is there an
+		// older page to fetch with this cursor?" When no MessageBefore is
+		// set, eligibleCount == total, so semantics are unchanged.
+		eligibleCount int
 	}
 	type cwdAgg struct {
 		sessions map[string]*sessAgg
@@ -453,6 +473,21 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 		// the slice append (with its periodic re-slice for the sliding
 		// window) is the hot allocation in this scan.
 		if !opts.HeadersOnly {
+			// SessionFilter narrows the response to one session, so we
+			// don't need to allocate Messages for sessions we'll discard
+			// when building groups. CWD-level counters (msgCount,
+			// lastSeen, SessionCount via len(c.sessions)) still get
+			// updated above so the UI's "session 1 of N" stays accurate.
+			if opts.SessionFilter != "" && sid != opts.SessionFilter {
+				return true
+			}
+			// MessageBefore is the message-page cursor: only entries
+			// strictly older count. eligibleCount tracks how many
+			// survived; Truncated below uses it instead of s.total.
+			if !opts.MessageBefore.IsZero() && !e.Timestamp.Before(opts.MessageBefore) {
+				return true
+			}
+			s.eligibleCount++
 			role := e.Role
 			if role == "" {
 				// Legacy entries (written before assistant-side capture existed)
@@ -502,6 +537,11 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 		// so the cursor can resume deterministically across tied last_seen.
 		allSessions := make([]Session, 0, len(c.sessions))
 		for sid, s := range c.sessions {
+			// SessionFilter: skip sessions we don't intend to emit so the
+			// downstream sort + cursor work doesn't touch them.
+			if opts.SessionFilter != "" && sid != opts.SessionFilter {
+				continue
+			}
 			allSessions = append(allSessions, Session{
 				SessionID:     sid,
 				Client:        s.client,
@@ -510,8 +550,12 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 				FirstSeen:     s.firstSeen,
 				LastSeen:      s.lastSeen,
 				MessageCount:  s.total,
-				Truncated:     s.total > len(s.msgs),
-				Messages:      s.msgs,
+				// Truncated answers "is there an older page to fetch?"
+				// — uses eligibleCount so a load-more response with no
+				// older messages reports Truncated=false even when the
+				// session's full history (s.total) exceeds the limit.
+				Truncated: s.eligibleCount > len(s.msgs),
+				Messages:  s.msgs,
 			})
 		}
 		sort.SliceStable(allSessions, func(i, j int) bool {
@@ -521,7 +565,13 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 			return allSessions[i].LastSeen.After(allSessions[j].LastSeen)
 		})
 
-		sessionCount := len(allSessions)
+		// SessionCount reflects the FULL CWD session population —
+		// SessionFilter narrowed allSessions to one entry, but the UI
+		// still wants the denominator for "1 of N sessions". Falling
+		// back to len(c.sessions) is exact because every session that
+		// was scanned ended up in c.sessions (the filter only skips the
+		// Sessions[] slice, not the aggregate map).
+		sessionCount := len(c.sessions)
 
 		// Cursor filter: keep sessions strictly older than the cursor on
 		// (LastSeen, SessionID). Using `<=` + dedup-by-id would be fragile

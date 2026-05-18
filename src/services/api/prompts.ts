@@ -68,6 +68,35 @@ export const promptsApi = {
     }),
 
   /**
+   * Fetch one page of older messages for a single session inside a CWD.
+   * `before` is the timestamp of the oldest message currently in the
+   * client's window — server returns messages strictly older than that,
+   * capped at `limit`. The session is the only one populated in the
+   * response's `groups[0].sessions[0]`; CWD-level meta still reflects
+   * the full CWD so "1 of N sessions" stays accurate.
+   *
+   * Tied per-session timestamps are a documented limitation: if two
+   * messages share the same `ts` exactly, the older one may not
+   * surface on the page boundary. Rare in practice.
+   */
+  loadOlderMessages: (
+    keyOrHash: string,
+    cwd: string,
+    sessionId: string,
+    before: string,
+    limit?: number,
+  ) =>
+    apiClient.get<PromptDetail>(`/prompts/users/${encodeURIComponent(keyOrHash)}`, {
+      timeout: PROMPTS_TIMEOUT_MS,
+      params: {
+        cwd,
+        session_id: sessionId,
+        message_before: before,
+        ...(limit ? { limit } : {}),
+      },
+    }),
+
+  /**
    * Fetch every CWD group's meta WITHOUT touching the sessions arrays.
    * Used by the refresh button so a refresh can update message counts and
    * last_seen without clobbering already-loaded session pages in the UI
