@@ -58,6 +58,12 @@ func Middleware() gin.HandlerFunc {
 
 		c.Request.Body = io.NopCloser(bytes.NewReader(mutated))
 		c.Request.ContentLength = int64(len(mutated))
+		// Defensively drop the parsed Content-Length / Transfer-Encoding
+		// metadata so any future code path that proxies the *http.Request
+		// as-is doesn't end up with a stale header winning over the updated
+		// ContentLength field.
+		c.Request.Header.Del("Content-Length")
+		c.Request.TransferEncoding = nil
 
 		log.WithFields(log.Fields{
 			"event": "effortnormalize.rewrite",

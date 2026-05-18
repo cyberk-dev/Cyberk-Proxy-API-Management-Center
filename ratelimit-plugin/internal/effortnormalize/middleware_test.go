@@ -114,6 +114,46 @@ func TestMiddleware_NonJSONIsPassthrough(t *testing.T) {
 	}
 }
 
+// gjson treats `reasoning.effort` as a missing field when `reasoning` is null
+// or a scalar — the lookup returns "". These tests pin that passthrough so a
+// future change to the lookup expression can't silently start writing
+// `reasoning.effort=low` into a body that never had a `reasoning` object.
+func TestMiddleware_ReasoningNullPassthrough(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	in := `{"model":"gpt-5-nano","reasoning":null}`
+	got := postJSON(t, srv.URL+"/v1/responses", in)
+	if !bytes.Equal(got, []byte(in)) {
+		t.Errorf("reasoning:null mutated: want %q, got %q", in, got)
+	}
+}
+
+func TestMiddleware_ReasoningStringPassthrough(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// Malformed shape — reasoning is a string at the wrong level. Must not
+	// be coerced into `{"reasoning":{"effort":"low"}}`.
+	in := `{"model":"gpt-5-nano","reasoning":"minimal"}`
+	got := postJSON(t, srv.URL+"/v1/responses", in)
+	if !bytes.Equal(got, []byte(in)) {
+		t.Errorf("reasoning:\"minimal\" mutated: want %q, got %q", in, got)
+	}
+}
+
+func TestMiddleware_GeminiShapePassthrough(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// Gemini uses generationConfig.thinkingConfig, never reasoning.effort.
+	in := `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}`
+	got := postJSON(t, srv.URL+"/v1/responses", in)
+	if !bytes.Equal(got, []byte(in)) {
+		t.Errorf("gemini-shape mutated: want %q, got %q", in, got)
+	}
+}
+
 func TestMiddleware_PreservesSiblingReasoningFields(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()

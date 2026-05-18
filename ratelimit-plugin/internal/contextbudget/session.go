@@ -82,7 +82,11 @@ var sessionHeaderNames = []string{
 // the conversation grows, so subsequent turns hash to the same value.
 func ExtractSession(r *http.Request, body []byte, protocol Protocol) SessionKey {
 	keyHash := hashAPIKey(extractAPIKey(r))
-	if id := headerSessionID(r); id != "" {
+	var headers http.Header
+	if r != nil {
+		headers = r.Header
+	}
+	if id := HeaderSessionID(headers); id != "" {
 		return SessionKey{APIKeyHash: keyHash, ID: id, Source: SessionFromHeader}
 	}
 	if id := bodyFingerprint(body, protocol); id != "" {
@@ -91,12 +95,18 @@ func ExtractSession(r *http.Request, body []byte, protocol Protocol) SessionKey 
 	return SessionKey{APIKeyHash: keyHash}
 }
 
-func headerSessionID(r *http.Request) string {
-	if r == nil || r.Header == nil {
+// HeaderSessionID scans the well-known session-id headers in priority order
+// and returns the first non-empty value. Shared with promptlog so that the
+// rate-limit tracker and the prompt-log UI bucket the same set of headers
+// — historically they diverged (e.g. opencode's `Session_id` was honored
+// here but ignored by promptlog's per-client detector, collapsing every
+// opencode conversation into one "(no-session)" bucket).
+func HeaderSessionID(h http.Header) string {
+	if h == nil {
 		return ""
 	}
 	for _, name := range sessionHeaderNames {
-		if v := strings.TrimSpace(r.Header.Get(name)); v != "" {
+		if v := strings.TrimSpace(h.Get(name)); v != "" {
 			return v
 		}
 	}

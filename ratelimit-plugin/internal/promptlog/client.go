@@ -3,6 +3,8 @@ package promptlog
 import (
 	"net/http"
 	"strings"
+
+	"github.com/cyberk/ratelimit-plugin/internal/contextbudget"
 )
 
 // Client is the metadata we extract from request headers to identify which
@@ -48,13 +50,24 @@ var detectors = []detectFn{
 // IdentifyClient runs the detector chain. Always returns a non-empty Name —
 // unmatched requests get ClientUnknown so analysts can still group "other
 // traffic" without losing entries.
+//
+// SessionID resolution is two-tier: detectors set it from a client-specific
+// header when available (Amp's X-Amp-Thread-Id, Claude Code's
+// X-Claude-Code-Session-Id), and any remaining gap is filled by the shared
+// contextbudget.HeaderSessionID lookup. The shared fallback covers clients
+// whose detection signal is the User-Agent only (opencode 1.15+, raw SDK
+// host apps that opt into Session_id / X-Session-Id), and prevents future
+// drift between the rate-limit tracker and the prompt-log UI bucketing.
 func IdentifyClient(h http.Header) Client {
 	for _, d := range detectors {
 		if c, ok := d(h); ok {
+			if c.SessionID == "" {
+				c.SessionID = contextbudget.HeaderSessionID(h)
+			}
 			return c
 		}
 	}
-	return Client{Name: ClientUnknown}
+	return Client{Name: ClientUnknown, SessionID: contextbudget.HeaderSessionID(h)}
 }
 
 // detectAmp keys off the X-Amp-* sidecar headers because Amp's User-Agent is
@@ -93,7 +106,10 @@ func detectOpencode(h http.Header) (Client, bool) {
 	if !strings.HasPrefix(ua, "opencode/") {
 		return Client{}, false
 	}
-	// opencode does not send any session header; SessionID stays empty.
+	// SessionID is filled by the shared IdentifyClient fallback. Opencode
+	// 1.15+ sends `Session_id` (and `X-Session-Affinity` as the upstream
+	// affinity hint, same value); older versions send neither, in which
+	// case SessionID stays empty.
 	return Client{
 		Name:    ClientOpencode,
 		Version: versionFromUA(ua, "opencode/"),

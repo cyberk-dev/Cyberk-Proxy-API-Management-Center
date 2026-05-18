@@ -75,6 +75,43 @@ func TestIdentifyClient_Opencode(t *testing.T) {
 	if c.Name != ClientOpencode || c.Version != "1.14.41" {
 		t.Errorf("got %+v", c)
 	}
+	if c.SessionID != "" {
+		t.Errorf("old opencode without session header should have empty SessionID, got %q", c.SessionID)
+	}
+}
+
+func TestIdentifyClient_Opencode_SessionIdHeader(t *testing.T) {
+	// opencode 1.15+ sends `Session_id: ses_xxx`. Before the shared fallback
+	// landed, this was dropped at the per-detector layer and every opencode
+	// conversation collapsed into the "(no-session)" bucket in the UI.
+	c := IdentifyClient(hdr(
+		"User-Agent", "opencode/1.15.4 (darwin 25.4.0; arm64) ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13",
+		"Session_id", "ses_1c42ebcccffeJx1dYBsGz4Lj8s",
+	))
+	if c.Name != ClientOpencode {
+		t.Errorf("name=%q want=%q", c.Name, ClientOpencode)
+	}
+	if c.SessionID != "ses_1c42ebcccffeJx1dYBsGz4Lj8s" {
+		t.Errorf("session=%q want=%q", c.SessionID, "ses_1c42ebcccffeJx1dYBsGz4Lj8s")
+	}
+}
+
+func TestIdentifyClient_Unknown_PicksUpSessionHeader(t *testing.T) {
+	// Generic / unknown clients that bother to send a session header should
+	// still get bucketed correctly. This guards against the same drift that
+	// historically affected opencode: a new client appears, the detector
+	// chain falls through to ClientUnknown, but session bucketing should
+	// still work via the shared header lookup.
+	c := IdentifyClient(hdr(
+		"User-Agent", "MyCustomAgent/1.0",
+		"X-Session-Id", "custom-session-42",
+	))
+	if c.Name != ClientUnknown {
+		t.Errorf("name=%q want=%q", c.Name, ClientUnknown)
+	}
+	if c.SessionID != "custom-session-42" {
+		t.Errorf("session=%q want=%q", c.SessionID, "custom-session-42")
+	}
 }
 
 func TestIdentifyClient_AISDK(t *testing.T) {
