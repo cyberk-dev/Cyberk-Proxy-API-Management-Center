@@ -462,6 +462,62 @@
   font-style: italic;
 }
 
+// Footer row inside an expanded CWD that fetches the next page of older
+// sessions on click. Sits below the session list; styled to look like a
+// secondary action rather than a primary CTA so it doesn't pull the eye
+// away from the data it's appending to.
+.loadMoreRow {
+  @include button-reset;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: $spacing-xs;
+  width: 100%;
+  margin: $spacing-xs 0 0;
+  padding: 6px $spacing-sm;
+  border-radius: 6px;
+  border: 1px dashed var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+
+  &:hover {
+    background: var(--surface-hover, rgba(127, 127, 127, 0.06));
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
+  }
+}
+
+// Spinner slot shown inside an expanded CWD while a page is in flight —
+// both for first-page-on-expand (lazy CWD) and for "Load older". Lives in
+// the same indented column as the session rows so the spinner sits where
+// the resulting sessions will appear, not in the gutter.
+.cwdLoading {
+  display: flex;
+  justify-content: center;
+  padding: $spacing-sm 0;
+}
+
+// Inline failure banner when a CWD page fetch errors out. Stays in place
+// instead of collapsing the CWD so the user can hit Retry without losing
+// their scroll position or expanded state.
+.cwdError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  margin: $spacing-xs 0 0;
+  padding: $spacing-xs $spacing-sm;
+  border-radius: 6px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
 .detailHeader {
   padding: $spacing-md;
   border-bottom: 1px solid var(--border-color);

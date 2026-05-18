@@ -9,6 +9,7 @@ import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useAuthStore } from '@/stores';
 import { promptsApi } from '@/services/api';
 import type {
+  PromptCWDGroup,
   PromptDetail,
   PromptMessage,
   PromptSession,
@@ -18,6 +19,8 @@ import type {
 import styles from './PromptsPage.module.scss';
 
 const DEFAULT_LIMIT = 200;
+const DEFAULT_SESSION_LIMIT = 200;
+const DEFAULT_INITIAL_CWDS = 20;
 const INLINE_TEMPLATES_STORAGE_KEY = 'prompts.inlineTemplates';
 const KEYS_PANEL_COLLAPSED_STORAGE_KEY = 'prompts.keysPanelCollapsed';
 
@@ -96,6 +99,13 @@ export function PromptsPage() {
   const [selectedMessage, setSelectedMessage] = useState<PromptMessage | null>(null);
   const [selectedSession, setSelectedSession] = useState<PromptSession | null>(null);
 
+  // Per-CWD load state for both first-page-on-expand and load-older.
+  // Tracked here (not inside the CWDGroup) so transient UI state stays out
+  // of the immutable response shape. Set updates use `new Set(prev)` so
+  // React re-renders; mutating .add() in place would miss the diff.
+  const [loadingMoreCWDs, setLoadingMoreCWDs] = useState<Set<string>>(new Set());
+  const [cwdLoadErrors, setCwdLoadErrors] = useState<Record<string, string>>({});
+
   const [pasteInput, setPasteInput] = useState('');
 
   // Templates: cache fetched bodies by hash so the right-pane "expand" button
@@ -165,6 +175,20 @@ export function PromptsPage() {
     }
   }, [templateCache, templateLoading]);
 
+  // Prewarm template cache for every templated message in `sessions`. Used
+  // by initial load and by every load-more append — without it, the tplChip
+  // for newly-loaded messages first renders as a bare hash and then flips
+  // to the labeled form on first click, which reads as a flicker.
+  const prewarmTemplates = useCallback((sessions: PromptSession[]) => {
+    const hashes = new Set<string>();
+    for (const s of sessions) {
+      for (const m of s.messages) {
+        if (m.prompt_template) hashes.add(m.prompt_template);
+      }
+    }
+    for (const h of hashes) void fetchTemplate(h);
+  }, [fetchTemplate]);
+
   const loadUsers = useCallback(async () => {
     setUsersLoading(true);
     setUsersError('');
@@ -184,10 +208,14 @@ export function PromptsPage() {
     setSelectedMessage(null);
     setSelectedSession(null);
     setExpandedTemplateInDetail(false);
+    setLoadingMoreCWDs(new Set());
+    setCwdLoadErrors({});
     try {
       const res = await promptsApi.getDetail(keyOrHash, {
         limit: DEFAULT_LIMIT,
         inlineTemplates,
+        sessionLimit: DEFAULT_SESSION_LIMIT,
+        initialCwds: DEFAULT_INITIAL_CWDS,
       });
       setDetail(res);
       // Expand all CWDs by default for compact overview; keep sessions
@@ -195,33 +223,138 @@ export function PromptsPage() {
       // the full message list.
       setExpandedCWDs(new Set(res.groups.map((g) => g.cwd)));
       setExpandedSessions(new Set());
-      // Prewarm template cache for EVERY message that references a
-      // template, not just the first per session. Without this, clicking
-      // any non-first templated message triggers a cache-miss fetch on
-      // first click — the tplChip then re-renders from the bare hash to
-      // the labeled form, which users perceive as a "reload." Dedup the
-      // hashes so we don't fire N parallel requests for the same body.
-      const tplHashes = new Set<string>();
-      for (const g of res.groups) {
-        for (const s of g.sessions) {
-          for (const m of s.messages) {
-            if (m.prompt_template) tplHashes.add(m.prompt_template);
-          }
-        }
-      }
-      for (const h of tplHashes) void fetchTemplate(h);
+      // Prewarm only the groups that came back with sessions populated —
+      // lazy groups (overview past initial_cwds) have empty sessions and
+      // will be prewarmed when the user expands them and we fetch their
+      // first page.
+      const populated: PromptSession[] = [];
+      for (const g of res.groups) populated.push(...g.sessions);
+      prewarmTemplates(populated);
     } catch (err) {
       setDetail(null);
       setDetailError(getErrorMessage(err, t('notification.refresh_failed')));
     } finally {
       setDetailLoading(false);
     }
-  }, [t, inlineTemplates, fetchTemplate]);
+  }, [t, inlineTemplates, prewarmTemplates]);
+
+  // Fetch one page of sessions for a single CWD. `before` undefined means
+  // "first page (most recent)"; otherwise resumes after the given cursor.
+  // Merges the response into existing detail state in-place: the rest of
+  // the tree (other CWDs, message-detail panel, expansion sets) is
+  // untouched. Failures land in `cwdLoadErrors[cwd]` and keep the CWD
+  // expanded so the user can hit Retry without a relayout.
+  const fetchCWDPage = useCallback(async (
+    keyOrHash: string,
+    cwd: string,
+    before?: { ts: string; sid: string },
+  ) => {
+    setLoadingMoreCWDs((prev) => {
+      if (prev.has(cwd)) return prev;
+      const next = new Set(prev);
+      next.add(cwd);
+      return next;
+    });
+    setCwdLoadErrors((prev) => {
+      if (!prev[cwd]) return prev;
+      const next: Record<string, string> = {};
+      for (const k of Object.keys(prev)) {
+        if (k !== cwd) next[k] = prev[k];
+      }
+      return next;
+    });
+    try {
+      const res = await promptsApi.loadCWDSessions(keyOrHash, cwd, before, DEFAULT_SESSION_LIMIT);
+      const got: PromptCWDGroup | undefined = res.groups[0];
+      setDetail((prev) => {
+        if (!prev) return prev;
+        // Stale-response guard: if the user switched keys while this fetch
+        // was in flight, the response belongs to the OLD key. Merging it
+        // would poison the new user's tree whenever CWD paths overlap
+        // (~/projects/foo is universal). Drop silently.
+        if (res.key_hash !== prev.key_hash) return prev;
+        const idx = prev.groups.findIndex((g) => g.cwd === cwd);
+        if (idx < 0) return prev;
+        const existing = prev.groups[idx];
+        // Dedup by session_id when appending — refresh-while-load-more
+        // races (or repeated clicks under flaky network) could otherwise
+        // produce duplicate keys in the React list.
+        const seen = new Set(existing.sessions.map((s) => s.session_id));
+        const incoming = got ? got.sessions.filter((s) => !seen.has(s.session_id)) : [];
+        const mergedSessions = before ? [...existing.sessions, ...incoming] : incoming;
+        const merged: PromptCWDGroup = {
+          ...existing,
+          sessions: mergedSessions,
+          has_more: got ? got.has_more : false,
+          session_count: got ? got.session_count : existing.session_count,
+          last_seen: got ? got.last_seen : existing.last_seen,
+          message_count: got ? got.message_count : existing.message_count,
+        };
+        const groups = prev.groups.slice();
+        groups[idx] = merged;
+        return { ...prev, groups };
+      });
+      if (got) prewarmTemplates(got.sessions);
+    } catch (err) {
+      const msg = getErrorMessage(err, t('notification.refresh_failed'));
+      setCwdLoadErrors((prev) => ({ ...prev, [cwd]: msg }));
+    } finally {
+      setLoadingMoreCWDs((prev) => {
+        if (!prev.has(cwd)) return prev;
+        const next = new Set(prev);
+        next.delete(cwd);
+        return next;
+      });
+    }
+  }, [t, prewarmTemplates]);
 
   const handleRefresh = useCallback(async () => {
     await loadUsers();
-    if (selectedKey) await loadDetail(selectedKey);
-  }, [loadUsers, loadDetail, selectedKey]);
+    if (!selectedKey) return;
+    // Non-destructive: pull CWD-level meta (message_count, last_seen,
+    // session_count, has_more) and merge in place, keeping any sessions
+    // the user has already paged into. This lets a user reload activity
+    // without losing their place in a deep CWD they were exploring.
+    try {
+      const res = await promptsApi.refreshHeaders(selectedKey);
+      setDetail((prev) => {
+        if (!prev) return res; // first time → adopt as-is
+        // Stale-response guard (same reason as fetchCWDPage). If selectedKey
+        // changed while the refresh was in flight, prev now describes a
+        // different user; merging would poison their tree.
+        if (res.key_hash !== prev.key_hash) return prev;
+        // Build the merged groups list by walking the RESPONSE first so
+        // its order (most-recent-CWD first) wins. Then APPEND any CWDs
+        // that were in state but missing from the response — file
+        // rotation or a transient writer race can drop a CWD for a
+        // single tick, and silently throwing away the user's already-
+        // loaded sessions in that window is worse than carrying a
+        // potentially stale group for one extra refresh.
+        const respCwds = new Set(res.groups.map((g) => g.cwd));
+        const merged: PromptCWDGroup[] = res.groups.map((g) => {
+          const existing = prev.groups.find((p) => p.cwd === g.cwd);
+          if (!existing) {
+            // Brand-new CWD since last load → stays lazy; expand will fetch.
+            return g;
+          }
+          // Preserve already-loaded sessions; only refresh the meta.
+          return {
+            ...existing,
+            message_count: g.message_count,
+            last_seen: g.last_seen,
+            session_count: g.session_count,
+            has_more: g.has_more,
+          };
+        });
+        for (const existing of prev.groups) {
+          if (!respCwds.has(existing.cwd)) merged.push(existing);
+        }
+        return { ...res, groups: merged };
+      });
+    } catch (err) {
+      setDetailError(getErrorMessage(err, t('notification.refresh_failed')));
+    }
+  }, [loadUsers, selectedKey, t]);
 
   useHeaderRefresh(handleRefresh);
 
@@ -248,12 +381,52 @@ export function PromptsPage() {
   };
 
   const toggleCWD = (cwd: string) => {
+    // Decide direction from the LATEST committed state, not from inside
+    // the updater. React 18 StrictMode invokes updaters twice in dev; a
+    // fetch fired from inside the updater would fire twice because the
+    // first call's `setLoadingMoreCWDs` hasn't committed by the time the
+    // second updater pass runs the `.has(cwd)` guard. Keep the updater
+    // pure; dispatch the side effect from out here.
+    const willOpen = !expandedCWDs.has(cwd);
     setExpandedCWDs((prev) => {
       const next = new Set(prev);
-      if (next.has(cwd)) next.delete(cwd);
-      else next.add(cwd);
+      if (willOpen) next.add(cwd);
+      else next.delete(cwd);
       return next;
     });
+    // Lazy CWDs (overview past initial_cwds, or new ones from refresh)
+    // come back with empty sessions + has_more=true. The expand action is
+    // the trigger to fetch their first page — modeled on Finder / VS Code
+    // tree expansion. Skip if already loading or if collapsing.
+    if (willOpen && selectedKey) {
+      const group = detail?.groups.find((g) => g.cwd === cwd);
+      if (group && group.sessions.length === 0 && group.has_more && !loadingMoreCWDs.has(cwd)) {
+        void fetchCWDPage(selectedKey, cwd);
+      }
+    }
+  };
+
+  const cursorOf = (s: PromptSession) => ({ ts: s.last_seen, sid: s.session_id });
+
+  const handleLoadOlder = (cwd: string) => {
+    if (!selectedKey) return;
+    const group = detail?.groups.find((g) => g.cwd === cwd);
+    if (!group || group.sessions.length === 0) return;
+    if (loadingMoreCWDs.has(cwd)) return;
+    const last = group.sessions[group.sessions.length - 1];
+    void fetchCWDPage(selectedKey, cwd, cursorOf(last));
+  };
+
+  const handleRetryCWD = (cwd: string) => {
+    if (!selectedKey) return;
+    const group = detail?.groups.find((g) => g.cwd === cwd);
+    if (!group) return;
+    // Retry resumes from wherever we stopped: first page if no sessions
+    // loaded yet, else after the oldest already-loaded session.
+    const cursor = group.sessions.length > 0
+      ? cursorOf(group.sessions[group.sessions.length - 1])
+      : undefined;
+    void fetchCWDPage(selectedKey, cwd, cursor);
   };
 
   const sessionKey = (cwd: string, sid: string) => `${cwd}::${sid}`;
@@ -446,7 +619,7 @@ export function PromptsPage() {
                         </span>
                         <span className={styles.cwdPath}>{group.cwd}</span>
                         <span className={styles.badge}>
-                          {group.message_count}m · {group.sessions.length}s
+                          {group.message_count}m · {group.session_count}s
                         </span>
                       </button>
                       {open && (
@@ -539,6 +712,31 @@ export function PromptsPage() {
                               </div>
                             );
                           })}
+                          {loadingMoreCWDs.has(group.cwd) && (
+                            <div className={styles.cwdLoading}>
+                              <LoadingSpinner />
+                            </div>
+                          )}
+                          {!loadingMoreCWDs.has(group.cwd) && cwdLoadErrors[group.cwd] && (
+                            <div className={styles.cwdError}>
+                              <span>{cwdLoadErrors[group.cwd]}</span>
+                              <Button variant="ghost" size="sm" onClick={() => handleRetryCWD(group.cwd)}>
+                                {t('prompts_page.retry', { defaultValue: 'Retry' })}
+                              </Button>
+                            </div>
+                          )}
+                          {!loadingMoreCWDs.has(group.cwd) && !cwdLoadErrors[group.cwd] && group.sessions.length > 0 && group.has_more && (
+                            <button
+                              type="button"
+                              className={styles.loadMoreRow}
+                              onClick={() => handleLoadOlder(group.cwd)}
+                            >
+                              {t('prompts_page.load_older', {
+                                defaultValue: 'Load older sessions ({{n}} more)',
+                                n: Math.max(0, group.session_count - group.sessions.length),
+                              })}
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>

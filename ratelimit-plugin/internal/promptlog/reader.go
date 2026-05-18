@@ -23,6 +23,10 @@ type scanCallback func(Entry) bool
 // scanAll walks every prompts-YYYY-MM-DD.jsonl in dir in chronological order
 // (oldest file first, lines within a file in append order). A missing dir is
 // not an error — it just means no data has been written yet.
+//
+// Emits a debug log line with file count + duration so operators can spot
+// slow installs before users complain. Cost is O(all lines × dir) per call;
+// pagination at the API layer reduces payload but not scan time.
 func scanAll(dir string, fn scanCallback) error {
 	if dir == "" {
 		return nil
@@ -38,11 +42,14 @@ func scanAll(dir string, fn scanCallback) error {
 		}
 	}
 	sort.Strings(files)
+	start := time.Now()
 	for _, path := range files {
 		if !scanFile(path, fn) {
+			log.Debugf("promptlog: scan dir=%s files=%d (stopped early) dur=%s", dir, len(files), time.Since(start))
 			return nil
 		}
 	}
+	log.Debugf("promptlog: scan dir=%s files=%d dur=%s", dir, len(files), time.Since(start))
 	return nil
 }
 
@@ -215,7 +222,58 @@ type CWDGroup struct {
 	CWD          string    `json:"cwd"`
 	MessageCount int       `json:"message_count"`
 	LastSeen     time.Time `json:"last_seen"`
-	Sessions     []Session `json:"sessions"`
+	// SessionCount is the total number of sessions in this CWD, regardless of
+	// any cursor filter or session_limit cap applied to Sessions. Stable
+	// across initial-load and load-more responses so the UI can render
+	// "X loaded of Y total" without bookkeeping.
+	SessionCount int `json:"session_count"`
+	// HasMore reports whether there are sessions older than the last one in
+	// Sessions that would be returned by a follow-up load-more page with the
+	// same session_limit. Distinct from SessionCount because session_before
+	// shifts the window.
+	HasMore bool `json:"has_more"`
+	// Sessions is the windowed/paginated slice for this response. Always a
+	// non-nil slice — empty when lazy (overview mode past initialCWDs) or
+	// when headers_only=1. Marshaling nil here would emit `null` and break
+	// `group.sessions.length` on the TS side.
+	Sessions []Session `json:"sessions"`
+}
+
+// SessionCursor is the composite pagination key used by session_before.
+// Strict timestamp-only comparison drops sessions sharing the exact same
+// last_seen (cheap to hit when sessions are bursty), so we tie-break on
+// session_id with deterministic ordering (lexicographic ascending) so the
+// caller can resume safely.
+type SessionCursor struct {
+	Ts  time.Time
+	Sid string
+}
+
+// DetailOpts bundles the optional knobs for BuildDetail. Zero values mean
+// "no filter / use default". MessageLimit defaults to 200, SessionLimit to
+// 200, InitialCWDs to 20.
+type DetailOpts struct {
+	// MessageLimit caps messages per session (existing `limit` query param).
+	MessageLimit int
+	// SessionLimit caps sessions per CWD in this response.
+	SessionLimit int
+	// InitialCWDs caps the number of CWDs (sorted by last_seen desc) that
+	// get their Sessions inlined. CWDs past this index get an empty Sessions
+	// slice and HasMore=true so the client lazy-loads on expand. Ignored
+	// when CWDFilter is set (we only return that one CWD).
+	InitialCWDs int
+	// CWDFilter, when non-empty, restricts the scan to entries whose CWD
+	// matches exactly. The response then contains at most one CWDGroup.
+	CWDFilter string
+	// SessionBefore, when non-nil, drops sessions whose ordering key is not
+	// strictly older than the cursor. Only meaningful with CWDFilter set
+	// (the handler rejects otherwise).
+	SessionBefore *SessionCursor
+	// HeadersOnly leaves every group's Sessions as an empty slice while
+	// still computing SessionCount and HasMore from the full aggregate.
+	// Used by the refresh button so it can update meta without clobbering
+	// already-loaded session pages on the client.
+	HeadersOnly bool
 }
 
 type Session struct {
@@ -277,12 +335,44 @@ func InlineTemplates(detail *Detail, templates *TemplateStore) {
 }
 
 // BuildDetail scans the JSONL store filtering by keyHash and returns a
-// tree grouped by cwd → session. perSessionLimit caps the messages array
-// per session (keeping the most recent N); sessions that exceed the cap
-// are marked Truncated for UI display.
-func BuildDetail(dir, keyHash string, configuredHint string, configured bool, perSessionLimit int) (*Detail, error) {
-	if perSessionLimit <= 0 {
-		perSessionLimit = 200
+// tree grouped by cwd → session.
+//
+// Pagination model (opts):
+//   - MessageLimit caps messages per session (sliding window, most recent
+//     N kept). Sessions exceeding the cap are flagged Truncated.
+//   - SessionLimit caps the number of sessions returned per CWDGroup.
+//     SessionCount holds the full per-CWD total (unaffected by SessionBefore)
+//     so the UI can show "X of Y" without bookkeeping.
+//   - CWDFilter scopes the scan: when set, only entries matching that CWD
+//     are aggregated and at most one group is returned. TotalMessages /
+//     TotalSessions / TotalCWDs then reflect just the filtered CWD —
+//     intentional, so a CWD-scoped reload reports CWD-scoped totals.
+//   - SessionBefore is a composite (last_seen, session_id) cursor; a
+//     session passes iff its (last_seen, session_id) is strictly older.
+//     Plain timestamp comparison would drop tied last_seen sessions.
+//   - InitialCWDs (only in overview mode, CWDFilter empty) decides how
+//     many CWDs (sorted last_seen desc) get their Sessions populated;
+//     the rest get an empty slice + HasMore=true for lazy load.
+//   - HeadersOnly clears every group's Sessions to an empty slice after
+//     SessionCount/HasMore have been computed — for non-destructive
+//     refresh that doesn't clobber already-loaded pages on the client.
+//
+// Empty Sessions is always `[]Session{}`, never nil, so JSON marshals it
+// as `[]` (not `null`) and TS callers can rely on `.length`.
+func BuildDetail(dir, keyHash string, configuredHint string, configured bool, opts DetailOpts) (*Detail, error) {
+	if opts.MessageLimit <= 0 {
+		opts.MessageLimit = 200
+	}
+	if opts.SessionLimit <= 0 {
+		opts.SessionLimit = 200
+	}
+	if opts.InitialCWDs < 0 {
+		opts.InitialCWDs = 0
+	} else if opts.InitialCWDs == 0 && opts.CWDFilter == "" {
+		// 0 from the handler means "param not provided" → use default. A
+		// caller that really wants zero CWDs inlined would pass a tiny
+		// MessageLimit instead; this branch is the natural ergonomics.
+		opts.InitialCWDs = 20
 	}
 	type sessAgg struct {
 		client        string
@@ -294,9 +384,9 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, pe
 		total         int
 	}
 	type cwdAgg struct {
-		sessions  map[string]*sessAgg
-		msgCount  int
-		lastSeen  time.Time
+		sessions map[string]*sessAgg
+		msgCount int
+		lastSeen time.Time
 	}
 	byCWD := map[string]*cwdAgg{}
 	totalSessions := map[string]struct{}{}
@@ -306,11 +396,17 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, pe
 		if e.KeyHash != keyHash {
 			return true
 		}
-		totalMessages++
 		cwd := e.CWD
 		if cwd == "" {
 			cwd = "(unknown)"
 		}
+		// Short-circuit when the caller scoped to one CWD: this is the load-
+		// more / refresh-cwd path and we don't want to spend any aggregate
+		// work on neighboring CWDs.
+		if opts.CWDFilter != "" && cwd != opts.CWDFilter {
+			return true
+		}
+		totalMessages++
 		c := byCWD[cwd]
 		if c == nil {
 			c = &cwdAgg{sessions: make(map[string]*sessAgg)}
@@ -352,26 +448,31 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, pe
 		if e.Timestamp.Before(s.firstSeen) {
 			s.firstSeen = e.Timestamp
 		}
-		// Keep the most recent perSessionLimit messages via a sliding window.
-		role := e.Role
-		if role == "" {
-			// Legacy entries (written before assistant-side capture existed)
-			// have no role field. Normalize to "user" here so downstream
-			// consumers — including any strict `role === 'user'` predicate
-			// in the UI — never have to special-case empty.
-			role = "user"
-		}
-		s.msgs = append(s.msgs, Message{
-			Timestamp:      e.Timestamp,
-			Model:          e.Model,
-			Provider:       e.Provider,
-			Status:         e.Status,
-			Role:           role,
-			Prompt:         e.Prompt,
-			PromptTemplate: e.PromptTemplate,
-		})
-		if len(s.msgs) > perSessionLimit {
-			s.msgs = s.msgs[len(s.msgs)-perSessionLimit:]
+		// Skip the per-message slice append on the headers_only fast
+		// path — we only need counts/timestamps for that response, and
+		// the slice append (with its periodic re-slice for the sliding
+		// window) is the hot allocation in this scan.
+		if !opts.HeadersOnly {
+			role := e.Role
+			if role == "" {
+				// Legacy entries (written before assistant-side capture existed)
+				// have no role field. Normalize to "user" here so downstream
+				// consumers — including any strict `role === 'user'` predicate
+				// in the UI — never have to special-case empty.
+				role = "user"
+			}
+			s.msgs = append(s.msgs, Message{
+				Timestamp:      e.Timestamp,
+				Model:          e.Model,
+				Provider:       e.Provider,
+				Status:         e.Status,
+				Role:           role,
+				Prompt:         e.Prompt,
+				PromptTemplate: e.PromptTemplate,
+			})
+			if len(s.msgs) > opts.MessageLimit {
+				s.msgs = s.msgs[len(s.msgs)-opts.MessageLimit:]
+			}
 		}
 		return true
 	}); err != nil {
@@ -380,9 +481,28 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, pe
 
 	groups := make([]CWDGroup, 0, len(byCWD))
 	for cwd, c := range byCWD {
-		sessions := make([]Session, 0, len(c.sessions))
+		// Fast path: headers_only doesn't need the Session list at all —
+		// just SessionCount + meta. Skipping the alloc + sort + cursor
+		// filter is the difference between O(num_sessions) and O(1) per
+		// CWD; on a power user's history that's hundreds of allocations
+		// avoided every time they hit refresh.
+		if opts.HeadersOnly {
+			groups = append(groups, CWDGroup{
+				CWD:          cwd,
+				MessageCount: c.msgCount,
+				LastSeen:     c.lastSeen,
+				SessionCount: len(c.sessions),
+				HasMore:      len(c.sessions) > 0,
+				Sessions:     []Session{},
+			})
+			continue
+		}
+		// Build the full session list for this CWD, then sort and apply
+		// cursor/cap windowing. Sort key is (LastSeen desc, SessionID asc)
+		// so the cursor can resume deterministically across tied last_seen.
+		allSessions := make([]Session, 0, len(c.sessions))
 		for sid, s := range c.sessions {
-			sessions = append(sessions, Session{
+			allSessions = append(allSessions, Session{
 				SessionID:     sid,
 				Client:        s.client,
 				ClientVersion: s.clientVersion,
@@ -394,19 +514,60 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, pe
 				Messages:      s.msgs,
 			})
 		}
-		sort.SliceStable(sessions, func(i, j int) bool {
-			return sessions[i].LastSeen.After(sessions[j].LastSeen)
+		sort.SliceStable(allSessions, func(i, j int) bool {
+			if allSessions[i].LastSeen.Equal(allSessions[j].LastSeen) {
+				return allSessions[i].SessionID < allSessions[j].SessionID
+			}
+			return allSessions[i].LastSeen.After(allSessions[j].LastSeen)
 		})
+
+		sessionCount := len(allSessions)
+
+		// Cursor filter: keep sessions strictly older than the cursor on
+		// (LastSeen, SessionID). Using `<=` + dedup-by-id would be fragile
+		// across pages — composite is the right shape.
+		filtered := allSessions
+		if opts.SessionBefore != nil {
+			cur := opts.SessionBefore
+			filtered = filtered[:0]
+			for _, s := range allSessions {
+				if s.LastSeen.Before(cur.Ts) || (s.LastSeen.Equal(cur.Ts) && s.SessionID > cur.Sid) {
+					filtered = append(filtered, s)
+				}
+			}
+		}
+
+		hasMore := len(filtered) > opts.SessionLimit
+		if len(filtered) > opts.SessionLimit {
+			filtered = filtered[:opts.SessionLimit]
+		}
+
 		groups = append(groups, CWDGroup{
 			CWD:          cwd,
 			MessageCount: c.msgCount,
 			LastSeen:     c.lastSeen,
-			Sessions:     sessions,
+			SessionCount: sessionCount,
+			HasMore:      hasMore,
+			Sessions:     filtered,
 		})
 	}
 	sort.SliceStable(groups, func(i, j int) bool {
 		return groups[i].LastSeen.After(groups[j].LastSeen)
 	})
+
+	// Overview mode: only the first InitialCWDs groups carry inlined
+	// sessions. The rest are made lazy (empty slice + has_more derived from
+	// SessionCount) so the initial payload doesn't blow up on power users
+	// with dozens of projects. Skipped when HeadersOnly is set — that case
+	// already shipped sessions=[] from the fast path above.
+	if opts.CWDFilter == "" && !opts.HeadersOnly {
+		for i := range groups {
+			if i >= opts.InitialCWDs {
+				groups[i].Sessions = []Session{}
+				groups[i].HasMore = groups[i].SessionCount > 0
+			}
+		}
+	}
 
 	return &Detail{
 		KeyHash:       keyHash,

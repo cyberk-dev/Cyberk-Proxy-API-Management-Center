@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -96,14 +97,63 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 			}
 		}
 
-		limit := 200
+		opts := DetailOpts{
+			MessageLimit: 200,
+			SessionLimit: 200,
+			InitialCWDs:  20,
+		}
 		if v := c.Query("limit"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 2000 {
-				limit = n
+				opts.MessageLimit = n
 			}
 		}
+		if v := c.Query("session_limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+				opts.SessionLimit = n
+			}
+		}
+		if v := c.Query("initial_cwds"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 100 {
+				opts.InitialCWDs = n
+			}
+		}
+		opts.CWDFilter = strings.TrimSpace(c.Query("cwd"))
+		opts.HeadersOnly = c.Query("headers_only") == "1" || c.Query("headers_only") == "true"
 
-		detail, err := BuildDetail(plogCfg.Dir, keyHash, hint, configured, limit)
+		// session_before is composite: "<RFC3339>|<session_id>". Strict-
+		// less-than on timestamp alone would drop sessions tied at the
+		// same last_seen — the cursor tie-breaks on session_id.
+		//
+		// SplitN with n=2 splits at the FIRST '|' only: the unsplit
+		// remainder is parts[1]. So a session_id that itself contains '|'
+		// (rare but allowed — session IDs are arbitrary strings on the
+		// wire) is preserved end-to-end. Don't change to Split() or you
+		// will silently break those cursors.
+		if raw := c.Query("session_before"); raw != "" {
+			if opts.CWDFilter == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "session_before requires cwd"})
+				return
+			}
+			if opts.HeadersOnly {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "session_before is meaningless with headers_only"})
+				return
+			}
+			parts := strings.SplitN(raw, "|", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "session_before must be '<RFC3339>|<session_id>'"})
+				return
+			}
+			ts, err := time.Parse(time.RFC3339Nano, parts[0])
+			if err != nil {
+				if ts, err = time.Parse(time.RFC3339, parts[0]); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "session_before timestamp not RFC3339"})
+					return
+				}
+			}
+			opts.SessionBefore = &SessionCursor{Ts: ts, Sid: parts[1]}
+		}
+
+		detail, err := BuildDetail(plogCfg.Dir, keyHash, hint, configured, opts)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

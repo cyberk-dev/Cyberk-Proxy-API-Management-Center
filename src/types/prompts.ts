@@ -88,6 +88,24 @@ export interface PromptCWDGroup {
   cwd: string;
   message_count: number;
   last_seen: string;
+  /**
+   * Total sessions in this CWD, independent of `session_before` and the
+   * `session_limit` cap on the response. Stable across initial-load and
+   * load-more responses so the UI can show "X loaded of Y total" without
+   * tracking it locally.
+   */
+  session_count: number;
+  /**
+   * True when the server has more sessions older than the last entry in
+   * `sessions`. False once the cursor has walked to the end, or when the
+   * group is lazy (overview past `initial_cwds`) with `session_count==0`.
+   */
+  has_more: boolean;
+  /**
+   * Always a non-nil array. Empty when the group is lazy (overview past
+   * `initial_cwds`) or when the response was `headers_only=1`; the client
+   * auto-fetches the first page on expand in those cases.
+   */
   sessions: PromptSession[];
 }
 

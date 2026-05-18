@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,7 +115,7 @@ func TestBuildDetail_GroupsByCwdAndSession(t *testing.T) {
 		Entry{KeyHash: hash, Timestamp: t0.Add(time.Hour), CWD: "/proj2", SessionID: "s2", Client: "amp", Model: "haiku", Prompt: "other"},
 	)
 
-	detail, err := BuildDetail(dir, hash, "sk-a...lice", true, 200)
+	detail, err := BuildDetail(dir, hash, "sk-a...lice", true, DetailOpts{MessageLimit: 200, SessionLimit: 200, InitialCWDs: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +147,7 @@ func TestBuildDetail_TruncatesPerSession(t *testing.T) {
 	}
 	writeJSONL(t, dir, "2026-05-15", entries...)
 
-	detail, err := BuildDetail(dir, hash, "", false, 10)
+	detail, err := BuildDetail(dir, hash, "", false, DetailOpts{MessageLimit: 10, SessionLimit: 200, InitialCWDs: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +197,7 @@ func TestBuildDetail_PreservesPromptTemplate(t *testing.T) {
 		Prompt:         " suffix tail",
 		PromptTemplate: "abc123abc123",
 	})
-	detail, err := BuildDetail(dir, hash, "", false, 50)
+	detail, err := BuildDetail(dir, hash, "", false, DetailOpts{MessageLimit: 50, SessionLimit: 200, InitialCWDs: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,5 +243,327 @@ func TestInlineTemplates_NilStoreSafe(t *testing.T) {
 	InlineTemplates(detail, nil)
 	if detail.Groups[0].Sessions[0].Messages[0].PromptTemplate != "y" {
 		t.Errorf("nil store should not mutate")
+	}
+}
+
+// seedSessions writes n sessions into the same CWD, each with one message.
+// last_seen for session i is base + i*step, so session_id ordering and
+// last_seen ordering both advance together. step=0 → all sessions tied.
+func seedSessions(t *testing.T, dir, date, hash, cwd string, n int, base time.Time, step time.Duration) {
+	t.Helper()
+	entries := make([]Entry, 0, n)
+	for i := 0; i < n; i++ {
+		entries = append(entries, Entry{
+			KeyHash:   hash,
+			Timestamp: base.Add(time.Duration(i) * step),
+			CWD:       cwd,
+			SessionID: "s-" + strconv.Itoa(i),
+			Prompt:    "p",
+		})
+	}
+	writeJSONL(t, dir, date, entries...)
+}
+
+func TestBuildDetail_SessionCapAndHasMore(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	base := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	seedSessions(t, dir, "2026-05-17", hash, "/p", 25, base, time.Minute)
+
+	detail, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit: 200, SessionLimit: 10, InitialCWDs: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := detail.Groups[0]
+	if g.SessionCount != 25 {
+		t.Errorf("SessionCount=%d want 25", g.SessionCount)
+	}
+	if !g.HasMore {
+		t.Error("HasMore=false but 25 > 10")
+	}
+	if len(g.Sessions) != 10 {
+		t.Errorf("len(Sessions)=%d want 10", len(g.Sessions))
+	}
+	// Sorted last_seen desc → newest first.
+	if g.Sessions[0].SessionID != "s-24" {
+		t.Errorf("first session=%s want s-24", g.Sessions[0].SessionID)
+	}
+}
+
+func TestBuildDetail_CompositeCursorTiedTimestamp(t *testing.T) {
+	// Three sessions sharing the EXACT same last_seen. Strict timestamp-only
+	// `<` would drop all of them when the cursor lands on any one of them;
+	// composite (ts, sid) must let the resumed page see the older sids.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	ts := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	writeJSONL(t, dir, "2026-05-17",
+		Entry{KeyHash: hash, Timestamp: ts, CWD: "/p", SessionID: "s-a", Prompt: "x"},
+		Entry{KeyHash: hash, Timestamp: ts, CWD: "/p", SessionID: "s-b", Prompt: "x"},
+		Entry{KeyHash: hash, Timestamp: ts, CWD: "/p", SessionID: "s-c", Prompt: "x"},
+	)
+
+	// Page 1: SessionLimit=1, no cursor → newest tie-break wins (lowest sid
+	// asc within tied last_seen). All three share last_seen so sort gives
+	// (s-a, s-b, s-c); SessionLimit=1 → returns s-a.
+	page1, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit: 200, SessionLimit: 1, CWDFilter: "/p",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1.Groups) != 1 || len(page1.Groups[0].Sessions) != 1 {
+		t.Fatalf("page1 unexpected: %+v", page1.Groups)
+	}
+	first := page1.Groups[0].Sessions[0].SessionID
+	if first != "s-a" {
+		t.Fatalf("page1 first=%s want s-a (tie-break sid asc)", first)
+	}
+	if !page1.Groups[0].HasMore {
+		t.Error("page1 HasMore=false but 3 > 1")
+	}
+
+	// Page 2: cursor on (ts, s-a) — composite predicate accepts s-b and s-c
+	// because their sid > "s-a" at the same ts. Strict ts-only would have
+	// dropped both.
+	page2, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit: 200, SessionLimit: 10, CWDFilter: "/p",
+		SessionBefore: &SessionCursor{Ts: ts, Sid: "s-a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, s := range page2.Groups[0].Sessions {
+		got = append(got, s.SessionID)
+	}
+	if len(got) != 2 || got[0] != "s-b" || got[1] != "s-c" {
+		t.Errorf("page2 sessions=%v want [s-b s-c]", got)
+	}
+	if page2.Groups[0].SessionCount != 3 {
+		t.Errorf("page2 SessionCount=%d want 3 (full-CWD count, not filtered)", page2.Groups[0].SessionCount)
+	}
+}
+
+func TestBuildDetail_SessionBeforeFilter(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	base := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	seedSessions(t, dir, "2026-05-17", hash, "/p", 5, base, time.Hour)
+
+	// Cursor on session s-3 (last_seen = base + 3h). Composite predicate
+	// keeps sessions with last_seen < cursor → s-0, s-1, s-2.
+	cur := &SessionCursor{Ts: base.Add(3 * time.Hour), Sid: "s-3"}
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit: 200, SessionLimit: 200, CWDFilter: "/p",
+		SessionBefore: cur,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, s := range d.Groups[0].Sessions {
+		got = append(got, s.SessionID)
+	}
+	// Sorted last_seen desc → s-2 first.
+	if len(got) != 3 || got[0] != "s-2" || got[2] != "s-0" {
+		t.Errorf("got %v want [s-2 s-1 s-0]", got)
+	}
+}
+
+func TestBuildDetail_CWDFilterNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	writeJSONL(t, dir, "2026-05-17",
+		Entry{KeyHash: hash, Timestamp: time.Now(), CWD: "/exists", SessionID: "s", Prompt: "x"},
+	)
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		SessionLimit: 200, CWDFilter: "/missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 0 {
+		t.Errorf("expected empty groups, got %+v", d.Groups)
+	}
+	// Totals reflect the filtered scan (scoped to /missing → 0 of everything).
+	if d.TotalMessages != 0 || d.TotalSessions != 0 || d.TotalCWDs != 0 {
+		t.Errorf("filtered totals nonzero: %+v", d)
+	}
+}
+
+func TestBuildDetail_HeadersOnlyEmitsEmptyArray(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	base := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	seedSessions(t, dir, "2026-05-17", hash, "/p1", 3, base, time.Minute)
+	seedSessions(t, dir, "2026-05-17", hash, "/p2", 5, base.Add(time.Hour), time.Minute)
+
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		SessionLimit: 200, InitialCWDs: 20, HeadersOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 2 {
+		t.Fatalf("groups=%d want 2", len(d.Groups))
+	}
+	for _, g := range d.Groups {
+		if g.Sessions == nil {
+			t.Errorf("Sessions nil for %s (must be []Session{} so JSON emits [])", g.CWD)
+		}
+		if len(g.Sessions) != 0 {
+			t.Errorf("Sessions len=%d want 0 for %s", len(g.Sessions), g.CWD)
+		}
+		if g.SessionCount == 0 {
+			t.Errorf("SessionCount=0 for %s — meta must survive headers_only", g.CWD)
+		}
+		if !g.HasMore {
+			t.Errorf("HasMore=false for %s — should be true when SessionCount > 0", g.CWD)
+		}
+	}
+
+	// JSON round-trip: emits `[]` not `null`.
+	raw, err := json.Marshal(d.Groups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"sessions":[]`) {
+		t.Errorf("headers_only marshal lost empty-array shape: %s", raw)
+	}
+}
+
+func TestBuildDetail_LazyCWDsMarshalEmptyArray(t *testing.T) {
+	// Overview-mode lazy-trim (CWDs past initial_cwds) shares the
+	// "empty-but-not-nil" invariant with headers_only. Without it, JSON
+	// emits `null` and breaks `group.sessions.length` on the TS side.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	base := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		seedSessions(t, dir, "2026-05-17", hash, "/c"+strconv.Itoa(i), 2,
+			base.Add(time.Duration(i)*time.Hour), time.Minute)
+	}
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		SessionLimit: 200, InitialCWDs: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// groups[0] is the most recent — has sessions. groups[1..] are lazy.
+	if len(d.Groups) < 2 {
+		t.Fatalf("expected ≥2 groups, got %d", len(d.Groups))
+	}
+	raw, err := json.Marshal(d.Groups[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"sessions":[]`) {
+		t.Errorf("lazy CWD must marshal sessions as [] (got %s)", raw)
+	}
+}
+
+func TestBuildDetail_CursorFiltersAllSessions(t *testing.T) {
+	// Cursor older than every session → response carries an empty
+	// sessions array (NOT nil), has_more=false. Frontend merge then
+	// becomes a no-op which is the right behavior.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	base := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	seedSessions(t, dir, "2026-05-17", hash, "/p", 3, base, time.Minute)
+
+	cur := &SessionCursor{Ts: base.Add(-time.Hour), Sid: "any"}
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		SessionLimit: 200, CWDFilter: "/p", SessionBefore: cur,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(d.Groups))
+	}
+	g := d.Groups[0]
+	if g.Sessions == nil || len(g.Sessions) != 0 {
+		t.Errorf("expected empty []Session{}, got %v", g.Sessions)
+	}
+	if g.HasMore {
+		t.Errorf("HasMore=true with cursor older than everything")
+	}
+	if g.SessionCount != 3 {
+		t.Errorf("SessionCount=%d want 3 (whole-CWD count, not filtered)", g.SessionCount)
+	}
+	raw, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"sessions":[]`) {
+		t.Errorf("cursor-empty must marshal as [] (got %s)", raw)
+	}
+}
+
+func TestBuildDetail_SessionIDWithPipeInCursor(t *testing.T) {
+	// Session IDs are arbitrary strings; one containing '|' must not
+	// confuse the composite cursor. handlers.go uses SplitN(n=2) which
+	// preserves the unsplit remainder — this test pins that invariant so
+	// a switch to Split() (which would split on every '|') gets caught.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	t0 := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	writeJSONL(t, dir, "2026-05-17",
+		Entry{KeyHash: hash, Timestamp: t0, CWD: "/p", SessionID: "weird|sid|a", Prompt: "x"},
+		Entry{KeyHash: hash, Timestamp: t0, CWD: "/p", SessionID: "weird|sid|b", Prompt: "x"},
+	)
+	// Cursor on "weird|sid|a" must let "weird|sid|b" through (sid asc).
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		SessionLimit: 10, CWDFilter: "/p",
+		SessionBefore: &SessionCursor{Ts: t0, Sid: "weird|sid|a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 1 || len(d.Groups[0].Sessions) != 1 {
+		t.Fatalf("expected 1 group with 1 session, got %+v", d.Groups)
+	}
+	if d.Groups[0].Sessions[0].SessionID != "weird|sid|b" {
+		t.Errorf("expected weird|sid|b after cursor, got %s", d.Groups[0].Sessions[0].SessionID)
+	}
+}
+
+func TestBuildDetail_InitialCWDsLazyTrim(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	base := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	// Five CWDs with distinct last_seen so sort order is deterministic.
+	for i := 0; i < 5; i++ {
+		seedSessions(t, dir, "2026-05-17", hash, "/c"+strconv.Itoa(i), 2,
+			base.Add(time.Duration(i)*time.Hour), time.Minute)
+	}
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		SessionLimit: 200, InitialCWDs: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 5 {
+		t.Fatalf("groups=%d want 5", len(d.Groups))
+	}
+	for i, g := range d.Groups {
+		if i < 3 {
+			if len(g.Sessions) != 2 {
+				t.Errorf("group[%d] (%s) len(Sessions)=%d want 2 (inlined)", i, g.CWD, len(g.Sessions))
+			}
+		} else {
+			if g.Sessions == nil || len(g.Sessions) != 0 {
+				t.Errorf("group[%d] (%s) should be lazy ([]), got %v", i, g.CWD, g.Sessions)
+			}
+			if !g.HasMore {
+				t.Errorf("group[%d] (%s) HasMore=false on lazy CWD", i, g.CWD)
+			}
+			if g.SessionCount != 2 {
+				t.Errorf("group[%d] (%s) SessionCount=%d want 2", i, g.CWD, g.SessionCount)
+			}
+		}
 	}
 }
