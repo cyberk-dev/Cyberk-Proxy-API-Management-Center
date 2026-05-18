@@ -69,6 +69,46 @@ policy:
   block_service_tiers:
     - priority
 
+# ── Context budget (optional) ────────────────────────────────────────────────
+# Per-request guardrails on conversation size, applied AFTER promptlog /
+# policy / ratelimit so the prompt log captures the original body and
+# rate-limit accounting reflects pre-injection state.
+#
+#   soft_threshold_tokens — when the estimated input token count crosses
+#     this, the proxy appends a <system-reminder>...</system-reminder> block
+#     to the last user-authored message before forwarding upstream. The
+#     reminder asks the model to wrap up, suggest /compact, or summarize
+#     state. Models do not have a tool to invoke /compact themselves, so
+#     this is best-effort prompting — Claude/Codex/opencode/gemini-cli all
+#     have their own local auto-compact triggering at lower thresholds.
+#
+#   hard_threshold_tokens — requests at or above this count are rejected
+#     before reaching upstream. Non-streaming requests get HTTP 413 with
+#     the provider's canonical error envelope (Anthropic / OpenAI / Gemini
+#     shapes are emitted accordingly); streaming requests get one SSE
+#     error event followed by [DONE] / channel close so SDK clients abort
+#     cleanly rather than hanging.
+#
+# Token counts are char-based estimates (chars / 4) — ~±20% for English,
+# higher drift for CJK and code. Pick thresholds with headroom below the
+# upstream provider's real window (e.g. 300k soft / 360k hard against
+# Anthropic's 200k window leaves operators in control of which requests
+# bounce at the proxy vs. the provider).
+#
+# Supported routes: /v1/messages, /v1/chat/completions, /v1/responses,
+# /v1beta/models/*:(stream)generateContent. Other paths pass through.
+# /v1/messages/count_tokens and :countTokens are skipped (no inference).
+#
+# Omit the section to disable. Set enabled: false to disable without
+# deleting the rest of the block.
+context_budget:
+  enabled: true
+  soft_threshold_tokens: 300000
+  hard_threshold_tokens: 360000
+  # {{used}}, {{soft}}, {{hard}} are substituted at request time.
+  reminder_template: |
+    Context usage is approaching the proxy's hard limit (~{{used}} of {{hard}} tokens, soft warning at {{soft}}). Please respond concisely. If the task is unfinished, summarize current progress, key decisions, and next steps so the user can run /compact or start a fresh session without losing state.
+
 # ── Prompt logging (optional) ────────────────────────────────────────────────
 # Capture the final user message of every chat request to a daily-rotated
 # JSONL file for offline analysis. Earlier turns of a conversation are NOT

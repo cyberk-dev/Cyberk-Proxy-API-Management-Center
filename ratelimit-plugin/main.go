@@ -29,6 +29,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/cyberk/ratelimit-plugin/internal/contextbudget"
 	"github.com/cyberk/ratelimit-plugin/internal/policy"
 	"github.com/cyberk/ratelimit-plugin/internal/promptlog"
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
@@ -72,6 +73,16 @@ func main() {
 	policyStore := policy.NewConfigStore(policyCfg)
 	if policyCfg.Enabled() {
 		log.Infof("policy: enabled (block_service_tiers=%v)", policyCfg.BlockServiceTiers)
+	}
+
+	cbCfg, err := contextbudget.LoadFromFile(absCfg)
+	if err != nil {
+		log.Warnf("context_budget: load failed, running disabled: %v", err)
+		cbCfg = &contextbudget.Config{}
+	}
+	cbStore := contextbudget.NewConfigStore(cbCfg)
+	if cbCfg.Enabled() {
+		log.Infof("context_budget: enabled (soft=%d hard=%d)", cbCfg.Soft(), cbCfg.Hard())
 	}
 
 	plogCfg, err := promptlog.LoadFromFile(absCfg)
@@ -126,6 +137,12 @@ func main() {
 		log.Warnf("policy: watcher disabled: %v", err)
 	}
 
+	if err := cbStore.Watch(ctx, absCfg, func(c *contextbudget.Config) {
+		log.Infof("context_budget: config swapped (enabled=%v soft=%d hard=%d)", c.Enabled(), c.Soft(), c.Hard())
+	}); err != nil {
+		log.Warnf("context_budget: watcher disabled: %v", err)
+	}
+
 	var persistWG sync.WaitGroup
 	persistWG.Add(1)
 	go func() {
@@ -177,7 +194,9 @@ func main() {
 	// Promptlog runs first: it must observe *every* request, including those
 	// rejected by policy/ratelimit, since rejected attempts are part of the
 	// behavior we want to analyze. Policy runs next so blocked requests still
-	// don't consume rate-limit budget.
+	// don't consume rate-limit budget. Context-budget runs LAST so the prompt
+	// log captures the original (unmutated) body and rate-limit accounting
+	// applies to the pre-reminder request.
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(absCfg).
@@ -186,6 +205,7 @@ func main() {
 				promptlog.Middleware(plogCfg, plogWriter),
 				policy.Middleware(policyStore),
 				ratelimit.Middleware(store, limiter),
+				contextbudget.Middleware(cbStore),
 			),
 			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, c *config.Config) {
 				usagepush.Register(engine, c)
