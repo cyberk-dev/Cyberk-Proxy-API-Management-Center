@@ -64,6 +64,22 @@ func TestHandler_SessionIDRequiresCwd(t *testing.T) {
 	}
 }
 
+func TestHandler_SessionBeforeExclusiveWithSessionID(t *testing.T) {
+	// Combining session-cursor with single-session targeting is a
+	// self-contradictory query — server must reject so the client
+	// doesn't silently get an empty Sessions array with SessionCount>0.
+	engine, secret := newReadHandlerRig(t)
+	rr := doReadGet(engine,
+		"/v0/management/prompts/users/sk-x?cwd=%2Fp&session_id=s&session_before=2026-05-17T10:00:00Z%7Cs",
+		secret)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400, body=%s", rr.Code, rr.Body.String())
+	}
+	if !contains(rr.Body.String(), "mutually exclusive") {
+		t.Errorf("error body should mention mutual exclusion: %s", rr.Body.String())
+	}
+}
+
 func TestHandler_MessageBeforeRequiresSessionID(t *testing.T) {
 	engine, secret := newReadHandlerRig(t)
 	rr := doReadGet(engine,

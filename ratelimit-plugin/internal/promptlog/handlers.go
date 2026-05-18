@@ -161,6 +161,16 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 				c.JSON(http.StatusBadRequest, gin.H{"error": "session_before is meaningless with headers_only"})
 				return
 			}
+			// session_before paginates SESSIONS within a CWD; session_id
+			// targets ONE session for message-paging. Combining them is
+			// self-contradictory — either the cursor filters out the
+			// targeted session (empty Sessions, SessionCount > 0) or it
+			// doesn't, and the client can't tell which silently. Reject
+			// so the caller fixes the contradiction at source.
+			if opts.SessionFilter != "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "session_before is mutually exclusive with session_id"})
+				return
+			}
 			parts := strings.SplitN(raw, "|", 2)
 			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "session_before must be '<RFC3339>|<session_id>'"})

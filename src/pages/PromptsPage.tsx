@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -114,6 +114,14 @@ export function PromptsPage() {
   // immutable-Set pattern as the CWD state above.
   const [loadingMoreMessages, setLoadingMoreMessages] = useState<Set<string>>(new Set());
   const [messageLoadErrors, setMessageLoadErrors] = useState<Record<string, string>>({});
+
+  // Synchronous gates against double-firing API requests. The state-set
+  // version above is for RENDER (spinner/disabled UI) and lags behind the
+  // user's click — closure-captured `loadingMoreX.has(key)` cannot see an
+  // in-flight call from the same React batch. Refs mutate immediately so
+  // the second click in a double-click bails before await.
+  const inFlightCWDsRef = useRef<Set<string>>(new Set());
+  const inFlightMessagesRef = useRef<Set<string>>(new Set());
 
   const [pasteInput, setPasteInput] = useState('');
 
@@ -260,6 +268,8 @@ export function PromptsPage() {
     setCwdLoadErrors({});
     setLoadingMoreMessages(new Set());
     setMessageLoadErrors({});
+    inFlightCWDsRef.current.clear();
+    inFlightMessagesRef.current.clear();
     try {
       const res = await promptsApi.getDetail(keyOrHash, {
         limit: DEFAULT_LIMIT,
@@ -299,6 +309,12 @@ export function PromptsPage() {
     cwd: string,
     before?: { ts: string; sid: string },
   ) => {
+    // Synchronous single-flight gate. The closure-captured
+    // loadingMoreCWDs guard in callers lets a double-click both pass
+    // before the first render commits — the ref blocks the second
+    // invocation before any API call goes out.
+    if (inFlightCWDsRef.current.has(cwd)) return;
+    inFlightCWDsRef.current.add(cwd);
     setLoadingMoreCWDs((prev) => {
       if (prev.has(cwd)) return prev;
       const next = new Set(prev);
@@ -349,6 +365,7 @@ export function PromptsPage() {
       const msg = getErrorMessage(err, t('notification.refresh_failed'));
       setCwdLoadErrors((prev) => ({ ...prev, [cwd]: msg }));
     } finally {
+      inFlightCWDsRef.current.delete(cwd);
       setLoadingMoreCWDs((prev) => {
         if (!prev.has(cwd)) return prev;
         const next = new Set(prev);
@@ -367,13 +384,15 @@ export function PromptsPage() {
   const fetchOlderMessages = useCallback(async (cwd: string, sid: string) => {
     if (!selectedKey) return;
     const skey = `${cwd}::${sid}`;
-    if (loadingMoreMessages.has(skey)) return;
+    // Synchronous single-flight gate (see fetchCWDPage for the rationale).
+    if (inFlightMessagesRef.current.has(skey)) return;
 
     const group = detail?.groups.find((g) => g.cwd === cwd);
     const sess = group?.sessions.find((s) => s.session_id === sid);
     if (!sess || sess.messages.length === 0) return;
     const oldestTs = sess.messages[0].ts;
 
+    inFlightMessagesRef.current.add(skey);
     setLoadingMoreMessages((prev) => {
       if (prev.has(skey)) return prev;
       const next = new Set(prev);
@@ -410,8 +429,14 @@ export function PromptsPage() {
           groups[gIdx] = { ...prev.groups[gIdx], sessions };
           return { ...prev, groups };
         }
-        const seen = new Set(existingSess.messages.map((m) => m.ts));
-        const older = got.messages.filter((m) => !seen.has(m.ts));
+        // Composite dedup key: `tool_use` and `tool_result` (and parallel
+        // tool calls) routinely share `ts` to the millisecond; a ts-only
+        // dedup would silently drop the second of each pair. Role +
+        // prompt-prefix is cheap and unique enough in practice.
+        const dedupKey = (m: PromptMessage) =>
+          `${m.ts}|${m.role ?? ''}|${(m.prompt ?? '').slice(0, 32)}`;
+        const seen = new Set(existingSess.messages.map(dedupKey));
+        const older = got.messages.filter((m) => !seen.has(dedupKey(m)));
         const sessions = prev.groups[gIdx].sessions.slice();
         sessions[sIdx] = {
           ...existingSess,
@@ -428,6 +453,7 @@ export function PromptsPage() {
       const msg = getErrorMessage(err, t('notification.refresh_failed'));
       setMessageLoadErrors((prev) => ({ ...prev, [skey]: msg }));
     } finally {
+      inFlightMessagesRef.current.delete(skey);
       setLoadingMoreMessages((prev) => {
         if (!prev.has(skey)) return prev;
         const next = new Set(prev);
@@ -435,7 +461,7 @@ export function PromptsPage() {
         return next;
       });
     }
-  }, [selectedKey, detail, loadingMoreMessages, t, prewarmTemplates]);
+  }, [selectedKey, detail, t, prewarmTemplates]);
 
   const handleRefresh = useCallback(async () => {
     await loadUsers();
@@ -613,7 +639,9 @@ export function PromptsPage() {
               defaultValue: 'Show templates inline (server-side splice)',
             })}
           </label>
-          <label className={styles.toggleLabel}>
+          <label className={styles.toggleLabel} title={t('prompts_page.sessions_per_cwd_hint', {
+            defaultValue: 'Changing this reloads detail and resets any loaded extra pages.',
+          })}>
             {t('prompts_page.sessions_per_cwd', { defaultValue: 'Sessions per CWD' })}
             <input
               type="number"
@@ -630,6 +658,11 @@ export function PromptsPage() {
               }}
               className={styles.limitInput}
             />
+            <span className={styles.limitHint}>
+              {t('prompts_page.sessions_per_cwd_hint_short', {
+                defaultValue: '(reloads on change)',
+              })}
+            </span>
           </label>
         </div>
       </div>
@@ -848,8 +881,8 @@ export function PromptsPage() {
                                             className={styles.loadMoreRow}
                                             onClick={() => fetchOlderMessages(group.cwd, sess.session_id)}
                                           >
-                                            {t('prompts_page.load_older_messages', {
-                                              defaultValue: 'Load older messages ({{n}} more)',
+                                            {t('prompts_page.load_more_messages', {
+                                              defaultValue: 'Load {{n}} more messages',
                                               n: remaining,
                                             })}
                                           </button>
@@ -913,8 +946,8 @@ export function PromptsPage() {
                               className={styles.loadMoreRow}
                               onClick={() => handleLoadOlder(group.cwd)}
                             >
-                              {t('prompts_page.load_older', {
-                                defaultValue: 'Load older sessions ({{n}} more)',
+                              {t('prompts_page.load_more_sessions', {
+                                defaultValue: 'Load {{n}} more sessions',
                                 n: Math.max(0, group.session_count - group.sessions.length),
                               })}
                             </button>

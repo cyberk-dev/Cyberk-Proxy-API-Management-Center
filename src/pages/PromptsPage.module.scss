@@ -644,6 +644,16 @@
   }
 }
 
+// Faint trailing note next to the limit input — warns that changes
+// trigger a reload (and silently reset paginated state). Kept tiny so
+// it doesn't crowd the inline header strip.
+.limitHint {
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  font-style: italic;
+}
+
 .tplChip {
   display: inline-block;
   padding: 1px 6px;

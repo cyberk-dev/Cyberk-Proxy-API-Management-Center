@@ -605,6 +605,46 @@ func TestBuildDetail_MessageBeforePaging(t *testing.T) {
 	}
 }
 
+func TestBuildDetail_MessageBeforeExactBoundaryTiedTs(t *testing.T) {
+	// Edge case: two messages share the exact timestamp that the cursor
+	// lands on. MessageBefore uses strict `Before()` (exclusive), so both
+	// tied messages at cursor.ts are excluded — documented limitation.
+	// Behavior verified: with MessageLimit=2 and 4 msgs (msg0@t0, two
+	// tied @t1, msg3@t2), cursor on t1 returns msg0 only (1 msg, both t1
+	// excluded). eligibleCount=1 < limit=2 → Truncated=false.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-a")
+	t0 := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Second)
+	t2 := t0.Add(2 * time.Second)
+	writeJSONL(t, dir, "2026-05-17",
+		Entry{KeyHash: hash, Timestamp: t0, CWD: "/p", SessionID: "s", Prompt: "msg0"},
+		Entry{KeyHash: hash, Timestamp: t1, CWD: "/p", SessionID: "s", Prompt: "msg1a", Role: "user"},
+		Entry{KeyHash: hash, Timestamp: t1, CWD: "/p", SessionID: "s", Prompt: "msg1b", Role: "assistant"},
+		Entry{KeyHash: hash, Timestamp: t2, CWD: "/p", SessionID: "s", Prompt: "msg2"},
+	)
+
+	d, err := BuildDetail(dir, hash, "", false, DetailOpts{
+		MessageLimit:  2,
+		CWDFilter:     "/p",
+		SessionFilter: "s",
+		MessageBefore: t1, // strict-less-than → excludes both tied @t1
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := d.Groups[0].Sessions[0]
+	if len(sess.Messages) != 1 {
+		t.Fatalf("expected 1 msg (msg0 only), got %d", len(sess.Messages))
+	}
+	if !sess.Messages[0].Timestamp.Equal(t0) {
+		t.Errorf("expected msg0@t0, got %v", sess.Messages[0].Timestamp)
+	}
+	if sess.Truncated {
+		t.Error("Truncated=true but only 1 msg passed filter and limit was 2")
+	}
+}
+
 func TestBuildDetail_SessionFilterScopesResponse(t *testing.T) {
 	// Two sessions in one CWD. SessionFilter returns just one of them in
 	// Sessions, but SessionCount on the CWDGroup reflects both — so the
