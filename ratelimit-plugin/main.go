@@ -18,6 +18,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	// Side-effect import: registers every built-in request/response translator
 	// (claude→codex, openai→codex, etc.) into the default translator registry.
@@ -30,6 +31,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/cyberk/ratelimit-plugin/internal/contextbudget"
+	"github.com/cyberk/ratelimit-plugin/internal/effortnormalize"
 	"github.com/cyberk/ratelimit-plugin/internal/policy"
 	"github.com/cyberk/ratelimit-plugin/internal/promptlog"
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
@@ -81,6 +83,9 @@ func main() {
 		cbCfg = &contextbudget.Config{}
 	}
 	cbStore := contextbudget.NewConfigStore(cbCfg)
+	// Session tracker bounds: 4096 sessions × ~40 bytes/entry ≈ <200 KiB.
+	// 30-minute TTL trades off some cross-restart accuracy for memory.
+	cbTracker := contextbudget.NewTracker(4096, 30*time.Minute)
 	if cbCfg.Enabled() {
 		log.Infof("context_budget: enabled (soft=%d hard=%d)", cbCfg.Soft(), cbCfg.Hard())
 	}
@@ -191,6 +196,13 @@ func main() {
 	ustore := usagestore.New()
 	ustore.RegisterPlugin()
 
+	// Feed accurate per-turn token totals back to the context-budget
+	// tracker so the NEXT turn can use upstream's number instead of a
+	// char/4 estimate. Registered unconditionally — the plugin no-ops
+	// when ctx carries no session key (e.g. requests skipped the
+	// contextbudget middleware due to disabled config).
+	coreusage.RegisterPlugin(contextbudget.NewUsagePlugin(cbTracker))
+
 	// Promptlog runs first: it must observe *every* request, including those
 	// rejected by policy/ratelimit, since rejected attempts are part of the
 	// behavior we want to analyze. Policy runs next so blocked requests still
@@ -203,9 +215,10 @@ func main() {
 		WithServerOptions(
 			api.WithMiddleware(
 				promptlog.Middleware(plogCfg, plogWriter),
+				effortnormalize.Middleware(),
 				policy.Middleware(policyStore),
 				ratelimit.Middleware(store, limiter),
-				contextbudget.Middleware(cbStore),
+				contextbudget.Middleware(cbStore, cbTracker),
 			),
 			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, c *config.Config) {
 				usagepush.Register(engine, c)

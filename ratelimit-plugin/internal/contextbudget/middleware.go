@@ -37,19 +37,27 @@ var (
 //     the middleware chain.
 //  3. Detect the upstream protocol from the URL path so we know which JSON
 //     shape to walk.
-//  4. EstimateTokens char-based; compare against soft/hard thresholds.
+//  4. Pick the budget figure for this request:
+//     - If a Tracker is wired in AND the prior turn's accurate count is
+//       still fresh for this session, use that (avoids char/4 drift).
+//     - Otherwise fall back to char/4 estimation.
 //  5. >= hard: abort with 413 (JSON) or one SSE error event (streaming).
 //     >= soft and < hard: inject <system-reminder> into the last user
 //     message and replace c.Request.Body with the mutated bytes so the
 //     downstream handler's c.GetRawData() picks up the new body.
 //     < soft: pass through unchanged.
 //
+// The session key (header- or body-hash-derived) is stashed on the
+// request context regardless of whether a tracker hit occurred, so the
+// downstream usage hook can record this turn's accurate count and seed
+// the tracker for NEXT turn.
+//
 // IMPORTANT: this middleware must run AFTER promptlog so the prompt log
 // records the original (unmutated) request body. It is safe to run after
 // ratelimit/policy because mutation only happens on the body bytes that
 // would be forwarded upstream — neither earlier middleware re-reads the
 // peek cache after this point.
-func Middleware(store *ConfigStore) gin.HandlerFunc {
+func Middleware(store *ConfigStore, tracker *Tracker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := store.Get()
 		if !cfg.Enabled() {
@@ -112,7 +120,36 @@ func Middleware(store *ConfigStore) gin.HandlerFunc {
 			return
 		}
 
-		tokens := EstimateTokens(peek.Body, protocol)
+		// Try the session-tracker first: if we recorded an accurate
+		// input-token count from this conversation's previous turn AND
+		// it's still fresh, use that as the budget figure for THIS
+		// turn. History grows incrementally so prior_count is a tight
+		// lower bound on current_count; char/4 typically over- or under-
+		// estimates by 10-20% depending on content shape. The tracker
+		// gives us the upstream provider's own number, modulo one turn
+		// of drift.
+		//
+		// We stash session+protocol on the *gin.Context (not r.Context())
+		// because the CLIProxyAPI SDK rebases the executor ctx on
+		// context.Background() at handlers.go:414 — only the gin.Context
+		// reference survives that rebase. Without this, HandleUsage
+		// would never see the session and the tracker would stay empty.
+		sessionKey := ExtractSession(c.Request, peek.Body, protocol)
+		SetGinSession(c, sessionKey)
+		SetGinProtocol(c, protocol)
+
+		var tokens int
+		var source string
+		if tracker != nil {
+			if prior, ok := tracker.Lookup(sessionKey); ok {
+				tokens = prior
+				source = "tracker_" + sessionKey.Source.String()
+			}
+		}
+		if tokens == 0 {
+			tokens = EstimateTokens(peek.Body, protocol)
+			source = "char_estimate"
+		}
 
 		if hard > 0 && tokens >= hard {
 			log.WithFields(log.Fields{
@@ -122,6 +159,8 @@ func Middleware(store *ConfigStore) gin.HandlerFunc {
 				"hard":      hard,
 				"streaming": streaming,
 				"path":      path,
+				"source":    source,
+				"session":   sessionKey.ID,
 			}).Warn("context budget: hard limit reached, blocking request")
 			RespondHardBlock(c, protocol, tokens, hard, streaming)
 			return
@@ -151,6 +190,8 @@ func Middleware(store *ConfigStore) gin.HandlerFunc {
 					"soft":     soft,
 					"hard":     hard,
 					"path":     path,
+					"source":   source,
+					"session":  sessionKey.ID,
 				}).Info("context budget: soft threshold reached, injected system-reminder")
 			}
 		}

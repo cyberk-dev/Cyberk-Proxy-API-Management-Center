@@ -2,15 +2,19 @@ package contextbudget
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
 )
@@ -43,7 +47,7 @@ func newTestServer(t *testing.T, store *ConfigStore) *httptest.Server {
 		ratelimit.PeekJSONBody(c)
 		c.Next()
 	})
-	r.Use(Middleware(store))
+	r.Use(Middleware(store, nil))
 	echo := func(c *gin.Context) {
 		body, _ := io.ReadAll(c.Request.Body)
 		c.Data(http.StatusOK, "application/json", body)
@@ -295,7 +299,7 @@ context_budget:
 `))
 	r := gin.New()
 	r.Use(func(c *gin.Context) { ratelimit.PeekJSONBody(c); c.Next() })
-	r.Use(Middleware(store))
+	r.Use(Middleware(store, nil))
 	r.POST("/v1/messages/count_tokens", func(c *gin.Context) {
 		body, _ := io.ReadAll(c.Request.Body)
 		c.Data(http.StatusOK, "application/json", body)
@@ -381,6 +385,163 @@ context_budget:
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413 from truncated body even under high hard threshold, got %d", resp.StatusCode)
+	}
+}
+
+func TestMiddleware_TrackerHitOverridesEstimate(t *testing.T) {
+	// Tracker says this session is at 9000 tokens (over hard=8000), but
+	// the request body's char/4 estimate would only be a few tokens.
+	// Middleware must use the tracker's number → hard block.
+	store := NewConfigStore(mustParse(t, `
+context_budget:
+  enabled: true
+  hard_threshold_tokens: 8000
+`))
+	tracker := NewTracker(8, time.Hour)
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) { ratelimit.PeekJSONBody(c); c.Next() })
+	r.Use(Middleware(store, tracker))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		body, _ := io.ReadAll(c.Request.Body)
+		c.Data(http.StatusOK, "application/json", body)
+	})
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	// Seed the tracker as if a previous turn ended at 9000 tokens for
+	// session "abc-123".
+	tracker.Record(SessionKey{APIKeyHash: "", ID: "abc-123", Source: SessionFromHeader}, 9000)
+
+	// Tiny body that would estimate to ~5 tokens via char/4.
+	body := tinyClaudeBody("hi")
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Claude-Code-Session-Id", "abc-123")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("tracker should have forced 413, got %d", resp.StatusCode)
+	}
+}
+
+// TestMiddleware_GinContextPropagatesToUsagePlugin is the end-to-end canary
+// for the S-HIGH bug oracle found: the CLIProxyAPI SDK rebases the executor
+// ctx on context.Background() (handlers.go:414) and only the *gin.Context
+// (stored under string key "gin") survives. So our middleware must stash
+// the session key on the gin.Context, NOT on r.Context() — otherwise the
+// downstream UsagePlugin never sees it and the tracker stays empty.
+//
+// This test simulates the production sequence:
+//   1. Middleware runs, extracts a session, calls SetGinSession on c.
+//   2. Handler runs, terminates the response.
+//   3. SDK builds a ctx like `context.WithValue(Background(), "gin", c)`
+//      and dispatches the usage Record to plugins.
+//   4. UsagePlugin.HandleUsage must recover the session key and record
+//      against it.
+//
+// If any step in the propagation chain is broken, tracker.Lookup at the
+// end returns (0, false) and we fail loudly.
+func TestMiddleware_GinContextPropagatesToUsagePlugin(t *testing.T) {
+	store := NewConfigStore(mustParse(t, `
+context_budget:
+  enabled: true
+  soft_threshold_tokens: 1000000
+  hard_threshold_tokens: 2000000
+`))
+	tracker := NewTracker(8, time.Hour)
+	plugin := NewUsagePlugin(tracker)
+
+	// Capture the gin.Context that the middleware decorated so we can
+	// replay the SDK's "wrap c under string key 'gin' and dispatch" step.
+	var captured *gin.Context
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) { ratelimit.PeekJSONBody(c); c.Next() })
+	r.Use(Middleware(store, tracker))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		captured = c
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	body := tinyClaudeBody("first turn user content for fingerprinting")
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("X-Claude-Code-Session-Id", "ses_canary")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("request failed: status=%d", resp.StatusCode)
+	}
+	if captured == nil {
+		t.Fatal("handler never captured gin.Context")
+	}
+
+	// Verify middleware actually stashed the keys.
+	if v, exists := captured.Get(ginKeySession); !exists {
+		t.Fatal("middleware did not set session on gin.Context")
+	} else if k, ok := v.(SessionKey); !ok || k.ID != "ses_canary" {
+		t.Fatalf("session on gin.Context = %v, want ses_canary", v)
+	}
+	if v, exists := captured.Get(ginKeyProtocol); !exists {
+		t.Fatal("middleware did not set protocol on gin.Context")
+	} else if p, ok := v.(Protocol); !ok || p != ProtoClaude {
+		t.Fatalf("protocol on gin.Context = %v, want ProtoClaude", v)
+	}
+
+	// Replay the SDK's usage-dispatch step verbatim.
+	usageCtx := context.WithValue(context.Background(), "gin", captured)
+	plugin.HandleUsage(usageCtx, coreusage.Record{
+		Detail: coreusage.Detail{InputTokens: 4321, CachedTokens: 100},
+	})
+
+	// Now the next request for this session should hit the tracker.
+	if got, ok := tracker.Lookup(SessionKey{APIKeyHash: hashAPIKey("alice"), ID: "ses_canary", Source: SessionFromHeader}); !ok {
+		t.Fatal("tracker did not record session — gin-context propagation is broken")
+	} else if got != 4421 {
+		t.Errorf("recorded tokens = %d, want 4421 (Input 4321 + Cached 100 for Claude)", got)
+	}
+}
+
+func TestMiddleware_TrackerMissFallsBackToEstimate(t *testing.T) {
+	store := NewConfigStore(mustParse(t, `
+context_budget:
+  enabled: true
+  hard_threshold_tokens: 200
+`))
+	tracker := NewTracker(8, time.Hour)
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) { ratelimit.PeekJSONBody(c); c.Next() })
+	r.Use(Middleware(store, tracker))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		c.Data(http.StatusOK, "application/json", []byte(`{"ok":1}`))
+	})
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	// No tracker entry for this session → fallback to char/4 estimate of
+	// the body. The body is 1200 chars → ~300 tokens > hard(200).
+	body := tinyClaudeBody(repeat("a", 1200))
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Claude-Code-Session-Id", "unseen-session")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("char/4 fallback should still block, got %d", resp.StatusCode)
 	}
 }
 
