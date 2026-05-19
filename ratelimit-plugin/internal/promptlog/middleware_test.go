@@ -171,8 +171,10 @@ func TestMiddleware_KeepsNonClaudeCodeWithoutCWD(t *testing.T) {
 	r, w, dir := newTestRig(t)
 	defer w.Close()
 
-	// Non-Claude-Code clients (curl, raw SDK, opencode) often have no cwd
-	// either, but they're not subagents — keep them.
+	// Non-Claude-Code clients without a session header (curl, raw SDK calls)
+	// often have no cwd either, but they're not subagents — keep them. The
+	// sub-call skip only fires when Session_id is present OR the client is
+	// Claude Code, so curl/no-session/no-cwd passes through.
 	body := `{"model":"claude","messages":[{"role":"user","content":"hello"}]}`
 	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -184,6 +186,67 @@ func TestMiddleware_KeepsNonClaudeCodeWithoutCWD(t *testing.T) {
 
 	if entries := readAllEntries(t, dir); len(entries) != 1 {
 		t.Fatalf("expected curl request to be kept, got %d entries", len(entries))
+	}
+}
+
+func TestMiddleware_DropsOpencodeTitleGen(t *testing.T) {
+	r, w, dir := newTestRig(t)
+	defer w.Close()
+
+	// opencode 1.15+ runs a parallel gpt-5-nano title-generation call per
+	// turn. It carries the same Session_id as the main chat but ships a
+	// synthetic "You are a title generator…" developer block instead of the
+	// usual env block — so cwd extraction returns "". Without this skip the
+	// title-gen call would surface as a second session card in the UI under
+	// "(unknown)" alongside the real (project_cwd, sid) one.
+	body := `{"model":"gpt-5-nano","input":[` +
+		`{"role":"developer","content":"You are a title generator. You output ONLY a thread title."},` +
+		`{"role":"user","content":[{"type":"input_text","text":"Generate a title for this conversation:"}]},` +
+		`{"role":"user","content":[{"type":"input_text","text":"how do I get rich?"}]}` +
+		`]}`
+	req, _ := http.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("User-Agent", "opencode/1.15.4 (darwin 25.4.0; arm64) ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13")
+	req.Header.Set("Session_id", "ses_1c41dd458ffePWlRar2V4bKbNL")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	if entries := readAllEntries(t, dir); len(entries) != 0 {
+		t.Fatalf("expected opencode title-gen to be dropped, got %d entries: %+v", len(entries), entries)
+	}
+}
+
+func TestMiddleware_KeepsOpencodeMainChatWithCWD(t *testing.T) {
+	r, w, dir := newTestRig(t)
+	defer w.Close()
+
+	// Main opencode chat: same Session_id as the title-gen above, but the
+	// developer block carries the env hint that resolves to a cwd. The skip
+	// must NOT fire here — this is the entry that should appear in the UI.
+	body := `{"model":"gpt-5.5","input":[` +
+		`{"role":"developer","content":"You are OpenCode.\n<env>\n  Working directory: /home/u/proj\n</env>"},` +
+		`{"role":"user","content":[{"type":"input_text","text":"how do I get rich?"}]}` +
+		`]}`
+	req, _ := http.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("User-Agent", "opencode/1.15.4 (darwin 25.4.0; arm64) ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13")
+	req.Header.Set("Session_id", "ses_1c41dd458ffePWlRar2V4bKbNL")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected opencode main chat to be kept, got %d entries", len(entries))
+	}
+	if entries[0]["session_id"] != "ses_1c41dd458ffePWlRar2V4bKbNL" {
+		t.Errorf("session_id=%v", entries[0]["session_id"])
+	}
+	if entries[0]["cwd"] != "/home/u/proj" {
+		t.Errorf("cwd=%v", entries[0]["cwd"])
 	}
 }
 

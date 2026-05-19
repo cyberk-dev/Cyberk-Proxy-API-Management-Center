@@ -78,13 +78,24 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		client := IdentifyClient(c.Request.Header)
 		cwd := extractCWD(extractSystemText(peek.Body, provider))
 
-		// Claude Code subagents (Task tool dispatches: web search, Explore,
-		// Plan, etc.) reuse the parent's UA + session id but ship their own
-		// system prompt without the env block — so cwd extraction returns "".
-		// They contain no human-typed content, just the dispatcher's framing
-		// like "Perform a web search for the query: ...". Drop them with the
-		// same rationale as the synthetic-CLI prefix list (see extract.go).
-		if client.Name == ClientClaudeCode && cwd == "" {
+		// Drop sub-call dispatches: synthetic agent infrastructure (title
+		// generation, subagent Task dispatches, auto-summarization, etc.)
+		// reuses the parent's session_id but ships a system prompt without
+		// the env block, so cwd extraction returns "". Logging them creates
+		// a duplicate "(unknown)" session card in the UI alongside the real
+		// (project_cwd, sid) one — same conversation surfaced twice.
+		//
+		// Two signals cover the observed cases:
+		//   - SessionID != "": opencode 1.15+ runs a parallel gpt-5-nano
+		//     title-gen call per turn that copies the user message but ships
+		//     a "You are a title generator…" system prompt; the Session_id
+		//     header is identical to the main chat. Any future CLI with the
+		//     same shape (Codex CLI sub-calls) is covered too.
+		//   - Name == ClientClaudeCode: Task tool dispatches (web search,
+		//     Explore, Plan, custom subagents) on Claude Code versions
+		//     < 2.1.97 that don't yet send X-Claude-Code-Session-Id, so the
+		//     SessionID signal above wouldn't fire.
+		if cwd == "" && (client.SessionID != "" || client.Name == ClientClaudeCode) {
 			c.Next()
 			return
 		}
