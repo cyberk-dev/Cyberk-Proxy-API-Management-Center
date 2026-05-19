@@ -1,8 +1,6 @@
 package contextbudget
 
 import (
-	"bytes"
-	"io"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -116,7 +114,7 @@ func Middleware(store *ConfigStore, tracker *Tracker) gin.HandlerFunc {
 			// meaningful in logs and error envelopes; the actual count
 			// is by definition larger.
 			usedLowerBound := len(peek.Body) / charsPerToken
-			RespondHardBlock(c, protocol, usedLowerBound, hard, streaming)
+			RespondOverflow(c, protocol, BudgetHard, usedLowerBound, hard, 0)
 			return
 		}
 
@@ -151,6 +149,33 @@ func Middleware(store *ConfigStore, tracker *Tracker) gin.HandlerFunc {
 			source = "char_estimate"
 		}
 
+		// Threshold policy:
+		//
+		//   - HARD: always reject. Hitting hard means the next request is
+		//     guaranteed to fail upstream anyway; we'd rather fail fast
+		//     and ask for /compact than burn the upstream call. Per CC's
+		//     conversation semantics, EVERY subsequent user turn in this
+		//     session will resend the bloated history and re-trigger this
+		//     branch — the user is forced to /compact or /clear to make
+		//     progress, which is the intended UX. The hard envelope is
+		//     identical across retries; we don't try to rate-limit it
+		//     because the bottleneck is the user, not the proxy.
+		//
+		//   - SOFT: reject ONCE per session (per tracker TTL window). The
+		//     first time a session crosses soft we send the user a 400
+		//     with a compact hint; the user can read it, decide whether
+		//     to /compact, and retry. After that first warning we let
+		//     subsequent soft crosses through so the user isn't deadlocked
+		//     between soft and hard if they choose to keep going. The
+		//     "warned" flag clears when token usage falls back below soft
+		//     (the user did /compact) so future climbs re-arm the warning.
+		//
+		// Returning HTTP 400 (invalid_request_error) rather than 413+SSE
+		// matters because Claude Code's agentic loop retries SSE-format
+		// errors as transient connection failures (~3 req/sec for ~30 s
+		// in practice) but stops on a JSON 400 — the message text is
+		// surfaced to the user instead. Anthropic SDK retry policy
+		// explicitly classifies 400 as non-retryable.
 		if hard > 0 && tokens >= hard {
 			log.WithFields(log.Fields{
 				"event":     "context_budget.hard_block",
@@ -161,42 +186,97 @@ func Middleware(store *ConfigStore, tracker *Tracker) gin.HandlerFunc {
 				"path":      path,
 				"source":    source,
 				"session":   sessionKey.ID,
-			}).Warn("context budget: hard limit reached, blocking request")
-			RespondHardBlock(c, protocol, tokens, hard, streaming)
+			}).Warn("context budget: hard limit reached, rejecting request")
+			RespondOverflow(c, protocol, BudgetHard, tokens, hard, soft)
 			return
 		}
 
 		if soft > 0 && tokens >= soft {
-			reminder := cfg.Reminder(tokens)
-			mutated := InjectSystemReminder(peek.Body, protocol, reminder)
-			if !bytes.Equal(mutated, peek.Body) {
-				// Replace the request body so the downstream handler's
-				// c.GetRawData() reads the mutated bytes. We deliberately
-				// do NOT update ratelimit's peek cache: by design, this is
-				// the last middleware in the chain and no later code reads
-				// the peek after us.
-				c.Request.Body = io.NopCloser(bytes.NewReader(mutated))
-				c.Request.ContentLength = int64(len(mutated))
-				// Defensively drop the parsed Content-Length / Transfer-
-				// Encoding metadata so any future code path that proxies
-				// the *http.Request as-is doesn't end up with a stale
-				// header winning over the updated ContentLength field.
-				c.Request.Header.Del("Content-Length")
-				c.Request.TransferEncoding = nil
-				log.WithFields(log.Fields{
-					"event":    "context_budget.soft_reminder",
-					"protocol": protocol.String(),
-					"tokens":   tokens,
-					"soft":     soft,
-					"hard":     hard,
-					"path":     path,
-					"source":   source,
-					"session":  sessionKey.ID,
-				}).Info("context budget: soft threshold reached, injected system-reminder")
+			// MarkSoftBlock atomically check-and-updates the burst state and
+			// returns enough metadata to log at the right verbosity. While
+			// the burst window is open every request is 400'd (no count
+			// budget — CC fires parallel sidecar requests that would chew
+			// through any small budget); after the window expires we
+			// passthrough until ClearWarning re-arms.
+			decision := SoftDecision{Block: true, BlockIndex: 1}
+			if tracker != nil {
+				decision = tracker.MarkSoftBlock(sessionKey)
 			}
+			if decision.Block {
+				fields := log.Fields{
+					"event":       "context_budget.soft_block",
+					"protocol":    protocol.String(),
+					"tokens":      tokens,
+					"soft":        soft,
+					"hard":        hard,
+					"streaming":   streaming,
+					"path":        path,
+					"source":      source,
+					"session":     sessionKey.ID,
+					"block_index": decision.BlockIndex,
+				}
+				if decision.BlockIndex == 1 {
+					// State transition: storm just opened. INFO so operators
+					// see one line per burst, not one per request in the storm.
+					log.WithFields(fields).Info("context budget: soft threshold crossed, burst window opens (400)")
+				} else {
+					fields["burst_age_ms"] = decision.BurstAge.Milliseconds()
+					log.WithFields(fields).Debug("context budget: in-burst block (400)")
+				}
+				RespondOverflow(c, protocol, BudgetSoft, tokens, hard, soft)
+				return
+			}
+			fields := log.Fields{
+				"event":        "context_budget.soft_passthrough",
+				"protocol":     protocol.String(),
+				"tokens":       tokens,
+				"soft":         soft,
+				"hard":         hard,
+				"path":         path,
+				"source":       source,
+				"session":      sessionKey.ID,
+				"burst_age_ms": decision.BurstAge.Milliseconds(),
+			}
+			if decision.BurstJustClosed {
+				// State transition: storm just ended; user has seen the
+				// error and is choosing to keep going. INFO once.
+				log.WithFields(fields).Info("context budget: burst window closed, resuming passthrough")
+			} else {
+				log.WithFields(fields).Debug("context budget: above soft but burst over, passing through")
+			}
+		} else if tracker != nil && soft > 0 {
+			// Below soft — clear any previous warning so future climbs
+			// re-arm. Cheap unconditional Delete (no presence check).
+			tracker.ClearWarning(sessionKey)
+		}
+
+		// Wrap c.Writer so we can scan the upstream response for usage
+		// fields synchronously inside this request goroutine — see the
+		// detailed rationale in capture.go. The wrapper is transparent
+		// to handlers (gin.ResponseWriter contract preserved); we read
+		// the captured numbers AFTER c.Next() returns and feed them to
+		// the tracker before this turn's stack unwinds.
+		var cap *usageCapturingWriter
+		if tracker != nil && sessionKey.ID != "" {
+			cap = newUsageCapturingWriter(c.Writer, protocol)
+			c.Writer = cap
 		}
 
 		c.Next()
+
+		if cap != nil {
+			total := cap.EffectiveInputTokens()
+			if total > 0 {
+				tracker.Record(sessionKey, total)
+				log.WithFields(log.Fields{
+					"event":    "context_budget.usage_record",
+					"protocol": protocol.String(),
+					"tokens":   total,
+					"session":  sessionKey.ID,
+					"source":   sessionKey.Source.String(),
+				}).Info("recorded session tokens from response capture")
+			}
+		}
 	}
 }
 

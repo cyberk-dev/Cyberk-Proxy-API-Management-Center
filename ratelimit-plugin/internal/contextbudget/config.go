@@ -50,7 +50,22 @@ type Config struct {
 	SoftThresholdTokens  int
 	HardThresholdTokens  int
 	ReminderTemplate     string
+	// SoftBlockBurstSeconds is how long, after a session first crosses the
+	// soft threshold, every subsequent request is also 400'd. The window
+	// blankets the entire client retry storm (Claude Code's ~1s/2s/4s
+	// backoff plus parallel sidecar requests) so the error text reliably
+	// surfaces to the user. After the window expires the session passes
+	// through until tokens fall back below soft (which re-arms a fresh
+	// window). 0 -> use SoftBlockBurst().
+	SoftBlockBurstSeconds int
 }
+
+// DefaultSoftBlockBurst is the default burst-window length used when the
+// config doesn't override it. 5 s comfortably covers Claude Code's 3-attempt
+// 1s/2s/4s exponential backoff with a small margin; other clients (Codex
+// CLI, Amp, custom SDKs) with longer backoff schedules can raise it via
+// `soft_block_burst_seconds` in config.yaml.
+const DefaultSoftBlockBurst = 5 * time.Second
 
 // Enabled reports whether the middleware should run. A nil or
 // explicitly-disabled config is pass-through; an enabled config with no
@@ -79,6 +94,15 @@ func (c *Config) Hard() int {
 	return c.HardThresholdTokens
 }
 
+// SoftBlockBurst returns the configured soft-block burst window or the
+// package default if unset. main.go applies this to the Tracker.
+func (c *Config) SoftBlockBurst() time.Duration {
+	if c == nil || c.SoftBlockBurstSeconds <= 0 {
+		return DefaultSoftBlockBurst
+	}
+	return time.Duration(c.SoftBlockBurstSeconds) * time.Second
+}
+
 // Reminder returns the reminder template after macro substitution. The
 // template may contain {{used}}, {{soft}}, {{hard}} placeholders.
 func (c *Config) Reminder(used int) string {
@@ -99,10 +123,11 @@ type rawRoot struct {
 }
 
 type rawConfig struct {
-	Enabled              *bool  `yaml:"enabled"`
-	SoftThresholdTokens  int    `yaml:"soft_threshold_tokens"`
-	HardThresholdTokens  int    `yaml:"hard_threshold_tokens"`
-	ReminderTemplate     string `yaml:"reminder_template"`
+	Enabled               *bool  `yaml:"enabled"`
+	SoftThresholdTokens   int    `yaml:"soft_threshold_tokens"`
+	HardThresholdTokens   int    `yaml:"hard_threshold_tokens"`
+	ReminderTemplate      string `yaml:"reminder_template"`
+	SoftBlockBurstSeconds int    `yaml:"soft_block_burst_seconds"`
 }
 
 // LoadFromFile reads p and extracts the context_budget section. A missing
@@ -123,9 +148,10 @@ func ParseBytes(data []byte) (*Config, error) {
 	}
 	r := root.ContextBudget
 	cfg := &Config{
-		SoftThresholdTokens: r.SoftThresholdTokens,
-		HardThresholdTokens: r.HardThresholdTokens,
-		ReminderTemplate:    r.ReminderTemplate,
+		SoftThresholdTokens:   r.SoftThresholdTokens,
+		HardThresholdTokens:   r.HardThresholdTokens,
+		ReminderTemplate:      r.ReminderTemplate,
+		SoftBlockBurstSeconds: r.SoftBlockBurstSeconds,
 	}
 	if r.Enabled != nil {
 		cfg.IsEnabled = *r.Enabled

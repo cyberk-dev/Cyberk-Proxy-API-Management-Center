@@ -18,7 +18,6 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	// Side-effect import: registers every built-in request/response translator
 	// (claude→codex, openai→codex, etc.) into the default translator registry.
@@ -86,8 +85,10 @@ func main() {
 	// Session tracker bounds: 4096 sessions × ~40 bytes/entry ≈ <200 KiB.
 	// 30-minute TTL trades off some cross-restart accuracy for memory.
 	cbTracker := contextbudget.NewTracker(4096, 30*time.Minute)
+	cbTracker.SetSoftBlockBurst(cbCfg.SoftBlockBurst())
 	if cbCfg.Enabled() {
-		log.Infof("context_budget: enabled (soft=%d hard=%d)", cbCfg.Soft(), cbCfg.Hard())
+		log.Infof("context_budget: enabled (soft=%d hard=%d burst=%s)",
+			cbCfg.Soft(), cbCfg.Hard(), cbCfg.SoftBlockBurst())
 	}
 
 	plogCfg, err := promptlog.LoadFromFile(absCfg)
@@ -143,7 +144,9 @@ func main() {
 	}
 
 	if err := cbStore.Watch(ctx, absCfg, func(c *contextbudget.Config) {
-		log.Infof("context_budget: config swapped (enabled=%v soft=%d hard=%d)", c.Enabled(), c.Soft(), c.Hard())
+		cbTracker.SetSoftBlockBurst(c.SoftBlockBurst())
+		log.Infof("context_budget: config swapped (enabled=%v soft=%d hard=%d burst=%s)",
+			c.Enabled(), c.Soft(), c.Hard(), c.SoftBlockBurst())
 	}); err != nil {
 		log.Warnf("context_budget: watcher disabled: %v", err)
 	}
@@ -181,6 +184,12 @@ func main() {
 				return
 			case <-ticker.C:
 				limiter.PruneIdle()
+				// Sweep stale soft-warning flags. Without this, sessions
+				// that warned and went dormant past the tracker TTL stay
+				// in the warnedSessions map forever (only active sessions
+				// trigger the implicit cleanup via MarkWarnedIfFirst /
+				// ClearWarning paths).
+				cbTracker.SweepWarned()
 			}
 		}
 	}()
@@ -196,12 +205,14 @@ func main() {
 	ustore := usagestore.New()
 	ustore.RegisterPlugin()
 
-	// Feed accurate per-turn token totals back to the context-budget
-	// tracker so the NEXT turn can use upstream's number instead of a
-	// char/4 estimate. Registered unconditionally — the plugin no-ops
-	// when ctx carries no session key (e.g. requests skipped the
-	// contextbudget middleware due to disabled config).
-	coreusage.RegisterPlugin(contextbudget.NewUsagePlugin(cbTracker))
+	// NOTE: previously we registered `contextbudget.NewUsagePlugin` as
+	// a coreusage.Plugin to capture token counts post-response. That
+	// path is fundamentally racy: HandleUsage runs async off a queue
+	// AFTER Gin has returned *gin.Context to its sync.Pool, by which
+	// point our c.Set keys have been wiped by c.reset(). The middleware
+	// now captures upstream usage synchronously via a ResponseWriter
+	// wrapper (see internal/contextbudget/capture.go) inside the same
+	// request goroutine, so this registration is no longer needed.
 
 	// Promptlog runs first: it must observe *every* request, including those
 	// rejected by policy/ratelimit, since rejected attempts are part of the

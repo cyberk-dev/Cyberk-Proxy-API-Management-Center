@@ -105,6 +105,12 @@ context_budget:
   enabled: true
   soft_threshold_tokens: 300000
   hard_threshold_tokens: 360000
+  # After a session first crosses soft, every request within this many
+  # seconds is also 400'd. Covers the client's full retry storm (Claude
+  # Code: 1s/2s/4s exponential backoff over 3 attempts, plus parallel
+  # sidecar requests) so the error reliably surfaces to the user. Larger
+  # for clients with longer backoff. Default 5s; 0 -> default.
+  soft_block_burst_seconds: 5
   # {{used}}, {{soft}}, {{hard}} are substituted at request time.
   reminder_template: |
     Context usage is approaching the proxy's hard limit (~{{used}} of {{hard}} tokens, soft warning at {{soft}}). Please respond concisely. If the task is unfinished, summarize current progress, key decisions, and next steps so the user can run /compact or start a fresh session without losing state.

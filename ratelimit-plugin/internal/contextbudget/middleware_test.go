@@ -127,30 +127,112 @@ context_budget:
 	}
 }
 
-func TestMiddleware_SoftInjects(t *testing.T) {
+func TestMiddleware_SoftBlocksOnceThenPasses(t *testing.T) {
+	// Policy: while inside the soft-block burst window EVERY request is
+	// blocked (so CC's parallel requests + retry storm all hit 400, which
+	// forces the client to surface the error to the user). After the burst
+	// window expires, subsequent crosses passthrough so the user isn't
+	// deadlocked if they choose to ignore the warning.
 	store := NewConfigStore(mustParse(t, `
 context_budget:
   enabled: true
   soft_threshold_tokens: 100
   hard_threshold_tokens: 1000
 `))
-	srv := newTestServer(t, store)
+	tracker := NewTracker(8, time.Hour)
+	tracker.SetSoftBlockBurst(80 * time.Millisecond)
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) { ratelimit.PeekJSONBody(c); c.Next() })
+	r.Use(Middleware(store, tracker))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		body, _ := io.ReadAll(c.Request.Body)
+		c.Data(http.StatusOK, "application/json", body)
+	})
+	srv := httptest.NewServer(r)
 	defer srv.Close()
 
 	// 500 chars / 4 = 125 tokens, between soft(100) and hard(1000).
 	body := tinyClaudeBody(repeat("a", 500))
-	resp := postJSON(t, srv.URL+"/v1/messages", body)
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("soft threshold should not block: status=%d", resp.StatusCode)
+
+	send := func() int {
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/messages", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Claude-Code-Session-Id", "ses_soft_once")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
 	}
-	got, _ := io.ReadAll(resp.Body)
-	if !containsReminder(got) {
-		t.Error("expected <system-reminder> tag in forwarded body")
+
+	// Inside burst → all 400.
+	if s := send(); s != http.StatusBadRequest {
+		t.Fatalf("first soft cross should 400, got %d", s)
 	}
-	// Original content must still be present.
-	if !strings.Contains(string(got), repeat("a", 500)) {
-		t.Error("original user content was lost during injection")
+	if s := send(); s != http.StatusBadRequest {
+		t.Fatalf("in-burst soft cross should 400, got %d", s)
+	}
+	if s := send(); s != http.StatusBadRequest {
+		t.Fatalf("in-burst soft cross should 400, got %d", s)
+	}
+	// Wait past burst → passthrough.
+	time.Sleep(120 * time.Millisecond)
+	if s := send(); s != http.StatusOK {
+		t.Fatalf("post-burst soft cross should pass, got %d", s)
+	}
+}
+
+func TestMiddleware_SoftWarningRearmsAfterCompact(t *testing.T) {
+	// If the session drops back below soft (user did /compact) the
+	// warning re-arms — the next time tokens climb above soft, the user
+	// gets a fresh 400.
+	store := NewConfigStore(mustParse(t, `
+context_budget:
+  enabled: true
+  soft_threshold_tokens: 100
+  hard_threshold_tokens: 1000
+`))
+	tracker := NewTracker(8, time.Hour)
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) { ratelimit.PeekJSONBody(c); c.Next() })
+	r.Use(Middleware(store, tracker))
+	r.POST("/v1/messages", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	send := func(text, sid string) *http.Response {
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/messages", strings.NewReader(tinyClaudeBody(text)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Claude-Code-Session-Id", sid)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// Cross soft → warn.
+	if r1 := send(repeat("a", 500), "ses_rearm"); r1.StatusCode != http.StatusBadRequest {
+		r1.Body.Close()
+		t.Fatalf("expected soft 400, got %d", r1.StatusCode)
+	} else {
+		r1.Body.Close()
+	}
+	// Drop below soft → warning should auto-clear via middleware.
+	if r2 := send("hi", "ses_rearm"); r2.StatusCode != http.StatusOK {
+		r2.Body.Close()
+		t.Fatalf("under-soft passthrough should 200, got %d", r2.StatusCode)
+	} else {
+		r2.Body.Close()
+	}
+	// Cross soft again → must warn AGAIN (re-armed).
+	r3 := send(repeat("a", 500), "ses_rearm")
+	defer r3.Body.Close()
+	if r3.StatusCode != http.StatusBadRequest {
+		t.Fatalf("re-armed soft should 400 again, got %d", r3.StatusCode)
 	}
 }
 
@@ -168,20 +250,31 @@ context_budget:
 	body := tinyClaudeBody(repeat("a", 1200))
 	resp := postJSON(t, srv.URL+"/v1/messages", body)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("expected 413, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
 	payload, _ := io.ReadAll(resp.Body)
-	// Claude envelope: {type:"error", error:{type:"request_too_large"}}
-	if gjson.GetBytes(payload, "error.type").String() != "request_too_large" {
+	// Claude 400 envelope: {type:"error", error:{type:"invalid_request_error"}}
+	if gjson.GetBytes(payload, "error.type").String() != "invalid_request_error" {
 		t.Errorf("unexpected error envelope: %s", payload)
 	}
 	if gjson.GetBytes(payload, "context_budget.hard_limit_tokens").Int() != 200 {
 		t.Errorf("expected hard_limit_tokens in envelope, got: %s", payload)
 	}
+	if gjson.GetBytes(payload, "context_budget.severity").String() != "hard" {
+		t.Errorf("expected severity=hard, got: %s", payload)
+	}
+	if !gjson.GetBytes(payload, "context_budget.compact_hint").Bool() {
+		t.Errorf("expected compact_hint=true in envelope")
+	}
 }
 
 func TestMiddleware_HardBlocks_StreamingAnthropic(t *testing.T) {
+	// Streaming requests get the SAME JSON 400 as non-streaming under
+	// the new policy. We deliberately do NOT emit an SSE error chunk
+	// anymore: Claude Code's agentic loop treats SSE errors as transient
+	// connection failures and retries at ~3 req/sec for ~30 s, whereas
+	// a plain JSON 400 is non-retryable in that loop.
 	store := NewConfigStore(mustParse(t, `
 context_budget:
   enabled: true
@@ -191,7 +284,6 @@ context_budget:
 	srv := newTestServer(t, store)
 	defer srv.Close()
 
-	// Body declares stream:true; expect SSE error chunk.
 	bodyMap := map[string]any{
 		"stream": true,
 		"messages": []map[string]any{
@@ -201,18 +293,15 @@ context_budget:
 	b, _ := json.Marshal(bodyMap)
 	resp := postJSON(t, srv.URL+"/v1/messages", string(b))
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("expected 413, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
-		t.Errorf("expected SSE content-type, got %q", ct)
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("expected JSON content-type (not SSE), got %q", ct)
 	}
-	raw, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(raw), "event: error") {
-		t.Errorf("expected SSE error event, got: %q", raw)
-	}
-	if !strings.Contains(string(raw), "request_too_large") {
-		t.Errorf("expected request_too_large in SSE payload, got: %q", raw)
+	payload, _ := io.ReadAll(resp.Body)
+	if gjson.GetBytes(payload, "error.type").String() != "invalid_request_error" {
+		t.Errorf("expected invalid_request_error, got: %s", payload)
 	}
 }
 
@@ -234,15 +323,12 @@ context_budget:
 	b, _ := json.Marshal(bodyMap)
 	resp := postJSON(t, srv.URL+"/v1/chat/completions", string(b))
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("expected 413, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
-	raw, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(raw), "context_length_exceeded") {
-		t.Errorf("expected OpenAI error code in SSE payload, got: %q", raw)
-	}
-	if !strings.Contains(string(raw), "[DONE]") {
-		t.Errorf("expected [DONE] terminator in OpenAI SSE error, got: %q", raw)
+	payload, _ := io.ReadAll(resp.Body)
+	if gjson.GetBytes(payload, "error.code").String() != "context_length_exceeded" {
+		t.Errorf("expected OpenAI error.code=context_length_exceeded, got: %s", payload)
 	}
 }
 
@@ -266,11 +352,11 @@ context_budget:
 	b, _ := json.Marshal(bodyMap)
 	resp := postJSON(t, srv.URL+"/v1beta/models/gemini-2.5-pro:streamGenerateContent", string(b))
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("expected 413, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
-		t.Errorf("expected SSE content-type for streamGenerateContent, got %q", ct)
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("expected JSON content-type for hard-block (no more SSE), got %q", ct)
 	}
 }
 
@@ -357,7 +443,7 @@ context_budget:
 `))
 	resp = postJSON(t, srv.URL+"/v1/messages", body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("after reload should block, got %d", resp.StatusCode)
 	}
 }
@@ -383,8 +469,8 @@ context_budget:
 	huge := tinyClaudeBody(repeat("a", 17*1024*1024))
 	resp := postJSON(t, srv.URL+"/v1/messages", huge)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("expected 413 from truncated body even under high hard threshold, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 from truncated body even under high hard threshold, got %d", resp.StatusCode)
 	}
 }
 
@@ -423,7 +509,7 @@ context_budget:
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("tracker should have forced 413, got %d", resp.StatusCode)
 	}
 }
@@ -540,30 +626,8 @@ context_budget:
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("char/4 fallback should still block, got %d", resp.StatusCode)
 	}
 }
 
-func TestMiddleware_ContentLengthUpdated(t *testing.T) {
-	store := NewConfigStore(mustParse(t, `
-context_budget:
-  enabled: true
-  soft_threshold_tokens: 100
-  hard_threshold_tokens: 1000
-`))
-	srv := newTestServer(t, store)
-	defer srv.Close()
-
-	body := tinyClaudeBody(repeat("a", 500))
-	resp := postJSON(t, srv.URL+"/v1/messages", body)
-	defer resp.Body.Close()
-	got, _ := io.ReadAll(resp.Body)
-	// echo handler reads the body server-side using io.ReadAll so it gets
-	// whatever bytes Gin has wired up. If ContentLength was not updated to
-	// match the mutated body, the handler would have stopped reading at the
-	// original ContentLength prefix and missed the appended reminder.
-	if !containsReminder(got) {
-		t.Error("mutated body not delivered in full to handler (ContentLength desync?)")
-	}
-}
