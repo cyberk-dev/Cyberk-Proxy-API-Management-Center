@@ -133,3 +133,32 @@ export interface PromptDetail {
   total_cwds: number;
   groups: PromptCWDGroup[];
 }
+
+/**
+ * One row of the `/users/:key/search` response. `cwd` and `session_id` are
+ * the render-time bucket (subagent → parent merged), matching the tree, so
+ * clicking a hit can deep-link into the parent's reading pane without the
+ * client redoing that resolution.
+ *
+ * `excerpt` is a clipped window of the original prompt with whitespace
+ * collapsed to single spaces. The client re-locates matches with a
+ * case-insensitive indexOf on this string to render highlights — the server
+ * deliberately does NOT return byte offsets because JS strings index by
+ * UTF-16 code units while the backend speaks UTF-8, and translating between
+ * the two for highlight ranges is error-prone.
+ */
+export interface PromptSearchHit {
+  cwd: string;
+  session_id: string;
+  ts: string;
+  role?: 'user' | 'assistant';
+  excerpt: string;
+  is_subagent?: boolean;
+  subagent_id?: string;
+}
+
+export interface PromptSearchResponse {
+  matches: PromptSearchHit[];
+  total_matches: number;
+  truncated: boolean;
+}

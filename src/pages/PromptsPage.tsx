@@ -1,17 +1,34 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input } from '@/components/ui/Input';
 import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
-import { IconChevronDown, IconChevronLeft, IconX } from '@/components/ui/icons';
+import {
+  IconChevronDown,
+  IconChevronLeft,
+  IconSearch,
+  IconX,
+} from '@/components/ui/icons';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { useAuthStore } from '@/stores';
 import { promptsApi } from '@/services/api';
+import { formatCwdLabel } from '@/utils/cwdLabel';
 import type {
   PromptCWDGroup,
   PromptDetail,
   PromptMessage,
+  PromptSearchHit,
+  PromptSearchResponse,
   PromptSession,
   PromptTemplate,
   PromptUserSummary,
@@ -23,6 +40,8 @@ const DEFAULT_SESSION_LIMIT = 200;
 const DEFAULT_INITIAL_CWDS = 20;
 const SESSION_LIMIT_MIN = 1;
 const SESSION_LIMIT_MAX = 500;
+const SEARCH_MIN_CHARS = 2;
+const SEARCH_LIMIT = 200;
 const INLINE_TEMPLATES_STORAGE_KEY = 'prompts.inlineTemplates';
 const KEYS_PANEL_COLLAPSED_STORAGE_KEY = 'prompts.keysPanelCollapsed';
 const SESSION_LIMIT_STORAGE_KEY = 'prompts.sessionLimit';
@@ -64,8 +83,6 @@ function summarizeBlock(b: {
   is_error?: boolean;
 }): string {
   if (b.type === 'text') {
-    // text content lives in `prompt` — block only carries length/truncation
-    // metadata. When a small legacy entry still has inline text, show it.
     if (b.text) {
       return b.text.length > 80 ? `text: ${b.text.slice(0, 80)}…` : `text: ${b.text}`;
     }
@@ -84,6 +101,39 @@ function summarizeBlock(b: {
   return parts.join(' · ');
 }
 
+// Render a string with every case-insensitive occurrence of `query` wrapped
+// in <mark>. The server's excerpt is already whitespace-collapsed, so a
+// straight indexOf walk is enough. Empty query → plain text. Note: this
+// matches NON-OVERLAPPING occurrences only — query "aa" against text "aaaa"
+// highlights [0..2] and [2..4], skipping [1..3]. That matches the server's
+// first-match excerpt window so the user never sees a missed mid-overlap
+// match in practice.
+function HighlightedExcerpt({ text, query }: { text: string; query: string }) {
+  const q = query.trim();
+  if (q.length < SEARCH_MIN_CHARS) return <>{text}</>;
+  const lowText = text.toLowerCase();
+  const lowQ = q.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const idx = lowText.indexOf(lowQ, i);
+    if (idx < 0) {
+      parts.push(text.slice(i));
+      break;
+    }
+    if (idx > i) parts.push(text.slice(i, idx));
+    parts.push(
+      <mark key={parts.length} className={styles.searchHighlight}>
+        {text.slice(idx, idx + lowQ.length)}
+      </mark>,
+    );
+    i = idx + lowQ.length;
+  }
+  return <>{parts.map((p, j) => <Fragment key={j}>{p}</Fragment>)}</>;
+}
+
+type SessionRef = { cwd: string; sid: string };
+
 export function PromptsPage() {
   const { t } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
@@ -97,39 +147,45 @@ export function PromptsPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
 
-  const [expandedCWDs, setExpandedCWDs] = useState<Set<string>>(new Set());
-  const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
-  const [selectedMessage, setSelectedMessage] = useState<PromptMessage | null>(null);
-  const [selectedSession, setSelectedSession] = useState<PromptSession | null>(null);
+  // Keys section: when a key is selected, collapse the list down to a single
+  // "Selected: X · Change" row so the CWD/sessions tree below has the bulk of
+  // the column. Clicking Change brings the full list back. Default true so a
+  // freshly-loaded page with no key selected shows the list.
+  const [keysListExpanded, setKeysListExpanded] = useState(true);
+  const [keysFilter, setKeysFilter] = useState('');
 
-  // Per-CWD load state for both first-page-on-expand and load-older.
-  // Tracked here (not inside the CWDGroup) so transient UI state stays out
-  // of the immutable response shape. Set updates use `new Set(prev)` so
-  // React re-renders; mutating .add() in place would miss the diff.
+  const [expandedCWDs, setExpandedCWDs] = useState<Set<string>>(new Set());
+
+  // Selection lives as identifiers, not direct refs. detail.groups is rebuilt
+  // on every load-more / refresh, so a captured session object would go stale
+  // and the messages list would re-render with the OLD messages array even
+  // after the user paged more in. Resolving via memoized find() keeps the
+  // current view bound to the latest detail.
+  const [selectedSessionRef, setSelectedSessionRef] = useState<SessionRef | null>(null);
+  const [selectedMessageTs, setSelectedMessageTs] = useState<string | null>(null);
+
+  const selectedSession = useMemo<PromptSession | null>(() => {
+    if (!detail || !selectedSessionRef) return null;
+    const group = detail.groups.find((g) => g.cwd === selectedSessionRef.cwd);
+    if (!group) return null;
+    return group.sessions.find((s) => s.session_id === selectedSessionRef.sid) ?? null;
+  }, [detail, selectedSessionRef]);
+
+  const selectedMessage = useMemo<PromptMessage | null>(() => {
+    if (!selectedSession || !selectedMessageTs) return null;
+    return selectedSession.messages.find((m) => m.ts === selectedMessageTs) ?? null;
+  }, [selectedSession, selectedMessageTs]);
+
   const [loadingMoreCWDs, setLoadingMoreCWDs] = useState<Set<string>>(new Set());
   const [cwdLoadErrors, setCwdLoadErrors] = useState<Record<string, string>>({});
-
-  // Per-session load state for paging older messages within a session.
-  // Keyed by `cwd::sid` (matches the existing sessionKey helper). Same
-  // immutable-Set pattern as the CWD state above.
   const [loadingMoreMessages, setLoadingMoreMessages] = useState<Set<string>>(new Set());
   const [messageLoadErrors, setMessageLoadErrors] = useState<Record<string, string>>({});
 
-  // Synchronous gates against double-firing API requests. The state-set
-  // version above is for RENDER (spinner/disabled UI) and lags behind the
-  // user's click — closure-captured `loadingMoreX.has(key)` cannot see an
-  // in-flight call from the same React batch. Refs mutate immediately so
-  // the second click in a double-click bails before await.
   const inFlightCWDsRef = useRef<Set<string>>(new Set());
   const inFlightMessagesRef = useRef<Set<string>>(new Set());
 
   const [pasteInput, setPasteInput] = useState('');
 
-  // Templates: cache fetched bodies by hash so the right-pane "expand" button
-  // resolves instantly on repeat clicks. inlineTemplates=true asks the server
-  // to splice template bodies back into prompts so the UI doesn't have to —
-  // useful when the user wants raw grep-friendly text everywhere. Toggle is
-  // persisted in localStorage so per-user preference sticks across reloads.
   const [inlineTemplates, setInlineTemplates] = useState<boolean>(() => {
     try {
       return localStorage.getItem(INLINE_TEMPLATES_STORAGE_KEY) === '1';
@@ -146,15 +202,10 @@ export function PromptsPage() {
     try {
       localStorage.setItem(INLINE_TEMPLATES_STORAGE_KEY, v ? '1' : '0');
     } catch {
-      /* localStorage unavailable — preference resets next reload */
+      /* localStorage unavailable */
     }
   }, []);
 
-  // Sessions-per-CWD knob. Surfaces as a small input next to the inline-
-  // templates toggle so operators can dial pagination without seeding test
-  // data (the default 200 is high enough that most real users never hit
-  // load-more; lowering to e.g. 10 makes the lazy + load-more flow
-  // immediately visible). Persisted per-user via localStorage.
   const [sessionLimit, setSessionLimit] = useState<number>(() => {
     try {
       const raw = localStorage.getItem(SESSION_LIMIT_STORAGE_KEY);
@@ -167,15 +218,10 @@ export function PromptsPage() {
     }
     return DEFAULT_SESSION_LIMIT;
   });
-  // Local editing buffer so partial input (e.g. user clearing the box to
-  // retype) doesn't immediately fire a reload with an invalid value.
   const [sessionLimitDraft, setSessionLimitDraft] = useState<string>(String(sessionLimit));
   const commitSessionLimit = useCallback((raw: string) => {
     const n = parseInt(raw, 10);
     if (!Number.isFinite(n) || n < SESSION_LIMIT_MIN || n > SESSION_LIMIT_MAX) {
-      // Snap back to the committed value on invalid input rather than
-      // applying a clamped one — silent clamping confuses users who
-      // typed e.g. "0" expecting a specific behavior.
       setSessionLimitDraft(String(sessionLimit));
       return;
     }
@@ -189,10 +235,6 @@ export function PromptsPage() {
     }
   }, [sessionLimit]);
 
-  // API-keys panel collapse: same localStorage shape as the templates
-  // toggle so per-user preference survives reloads. When collapsed the
-  // left column shrinks to a 36px rail that holds only the expand
-  // button — the keys list is hidden but discoverable.
   const [keysCollapsed, setKeysCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(KEYS_PANEL_COLLAPSED_STORAGE_KEY) === '1';
@@ -211,6 +253,40 @@ export function PromptsPage() {
       return next;
     });
   }, []);
+
+  // Search state. searchQuery is the controlled input value (immediate),
+  // deferredQuery is what drives the fetch effect — useDeferredValue debounces
+  // implicitly during transitions so the user doesn't see a request per
+  // keystroke.
+  const [searchQuery, setSearchQuery] = useState('');
+  const deferredQuery = useDeferredValue(searchQuery);
+  const [searchResults, setSearchResults] = useState<PromptSearchResponse | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState('');
+
+  // Scroll memory + first-select-bottom flag. Keyed by `keyHash::session_id`
+  // so the maps survive across session switches but reset on key change.
+  // sessionsSeenRef tracks "has the bottom-scroll already fired for this
+  // session" — without it, every refresh that re-creates the session object
+  // would re-trigger the scroll-to-bottom and lose the user's reading
+  // position.
+  const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollPosByKey = useRef<Map<string, number>>(new Map());
+  const sessionsSeenRef = useRef<Set<string>>(new Set());
+
+  // Pagination anchor for "load older messages". Capture scrollHeight BEFORE
+  // dispatching the fetch; after the new messages render, restore scrollTop
+  // by (newHeight - oldHeight) so the user's current read position stays put
+  // instead of jumping to the top of the freshly-prepended block.
+  const pendingScrollAnchor = useRef<number | null>(null);
+
+  // Monotonic sequence for search requests. The deferred-vs-current race is
+  // real: user types "abc" (fetch fires, in-flight), backspaces to "ab" (the
+  // onChange synchronously clears searchResults), but the "abc" promise
+  // resolves later and would overwrite cleared state without this guard.
+  // Bumped on every fire AND on every onChange-driven clear so stale
+  // responses can detect that they're no longer the current request.
+  const searchSeqRef = useRef(0);
 
   const fetchTemplate = useCallback(async (hash: string): Promise<PromptTemplate | null> => {
     if (templateCache[hash]) return templateCache[hash];
@@ -231,10 +307,6 @@ export function PromptsPage() {
     }
   }, [templateCache, templateLoading]);
 
-  // Prewarm template cache for every templated message in `sessions`. Used
-  // by initial load and by every load-more append — without it, the tplChip
-  // for newly-loaded messages first renders as a bare hash and then flips
-  // to the labeled form on first click, which reads as a flicker.
   const prewarmTemplates = useCallback((sessions: PromptSession[]) => {
     const hashes = new Set<string>();
     for (const s of sessions) {
@@ -261,13 +333,27 @@ export function PromptsPage() {
   const loadDetail = useCallback(async (keyOrHash: string) => {
     setDetailLoading(true);
     setDetailError('');
-    setSelectedMessage(null);
-    setSelectedSession(null);
+    setSelectedMessageTs(null);
+    setSelectedSessionRef(null);
     setExpandedTemplateInDetail(false);
     setLoadingMoreCWDs(new Set());
     setCwdLoadErrors({});
     setLoadingMoreMessages(new Set());
     setMessageLoadErrors({});
+    // Search + scroll memory belong to the previous key — purge here so a
+    // sessionLimit-triggered reload also resets them. Doing this in
+    // loadDetail rather than a selectedKey-change effect keeps the resets
+    // OFF the cascading-render lint path (state writes from inside effects
+    // are flagged for re-render churn).
+    setSearchQuery('');
+    setSearchResults(null);
+    setSearchError('');
+    setSearchLoading(false);
+    // Bump so any in-flight search from the old key bails on resolution.
+    searchSeqRef.current++;
+    scrollPosByKey.current.clear();
+    sessionsSeenRef.current.clear();
+    pendingScrollAnchor.current = null;
     inFlightCWDsRef.current.clear();
     inFlightMessagesRef.current.clear();
     try {
@@ -278,15 +364,17 @@ export function PromptsPage() {
         initialCwds: DEFAULT_INITIAL_CWDS,
       });
       setDetail(res);
-      // Expand all CWDs by default for compact overview; keep sessions
-      // collapsed so the user sees one title row per session instead of
-      // the full message list.
+      // Expand every CWD so the user can browse session titles immediately;
+      // sessions are no longer nested-expanded (the reading pane is panel 2).
       setExpandedCWDs(new Set(res.groups.map((g) => g.cwd)));
-      setExpandedSessions(new Set());
-      // Prewarm only the groups that came back with sessions populated —
-      // lazy groups (overview past initial_cwds) have empty sessions and
-      // will be prewarmed when the user expands them and we fetch their
-      // first page.
+      // Auto-select the most-recent session of the most-recent CWD so panel
+      // 2 has content right after load. If the key has zero activity, leave
+      // selection null — the empty-state placeholder in panel 2 takes over.
+      const firstGroup = res.groups.find((g) => g.sessions.length > 0);
+      const firstSession = firstGroup?.sessions[0];
+      if (firstGroup && firstSession) {
+        setSelectedSessionRef({ cwd: firstGroup.cwd, sid: firstSession.session_id });
+      }
       const populated: PromptSession[] = [];
       for (const g of res.groups) populated.push(...g.sessions);
       prewarmTemplates(populated);
@@ -298,21 +386,11 @@ export function PromptsPage() {
     }
   }, [t, inlineTemplates, sessionLimit, prewarmTemplates]);
 
-  // Fetch one page of sessions for a single CWD. `before` undefined means
-  // "first page (most recent)"; otherwise resumes after the given cursor.
-  // Merges the response into existing detail state in-place: the rest of
-  // the tree (other CWDs, message-detail panel, expansion sets) is
-  // untouched. Failures land in `cwdLoadErrors[cwd]` and keep the CWD
-  // expanded so the user can hit Retry without a relayout.
   const fetchCWDPage = useCallback(async (
     keyOrHash: string,
     cwd: string,
     before?: { ts: string; sid: string },
   ) => {
-    // Synchronous single-flight gate. The closure-captured
-    // loadingMoreCWDs guard in callers lets a double-click both pass
-    // before the first render commits — the ref blocks the second
-    // invocation before any API call goes out.
     if (inFlightCWDsRef.current.has(cwd)) return;
     inFlightCWDsRef.current.add(cwd);
     setLoadingMoreCWDs((prev) => {
@@ -334,17 +412,10 @@ export function PromptsPage() {
       const got: PromptCWDGroup | undefined = res.groups[0];
       setDetail((prev) => {
         if (!prev) return prev;
-        // Stale-response guard: if the user switched keys while this fetch
-        // was in flight, the response belongs to the OLD key. Merging it
-        // would poison the new user's tree whenever CWD paths overlap
-        // (~/projects/foo is universal). Drop silently.
         if (res.key_hash !== prev.key_hash) return prev;
         const idx = prev.groups.findIndex((g) => g.cwd === cwd);
         if (idx < 0) return prev;
         const existing = prev.groups[idx];
-        // Dedup by session_id when appending — refresh-while-load-more
-        // races (or repeated clicks under flaky network) could otherwise
-        // produce duplicate keys in the React list.
         const seen = new Set(existing.sessions.map((s) => s.session_id));
         const incoming = got ? got.sessions.filter((s) => !seen.has(s.session_id)) : [];
         const mergedSessions = before ? [...existing.sessions, ...incoming] : incoming;
@@ -375,16 +446,9 @@ export function PromptsPage() {
     }
   }, [t, sessionLimit, prewarmTemplates]);
 
-  // Fetch one page of older messages for an expanded session. Anchor
-  // cursor is the oldest currently-loaded message's `ts`. Server returns
-  // strictly-older messages (tied-ts edge documented as a known limit on
-  // the backend); we dedup by `ts` defensively in case a refresh-merge
-  // shifted things underneath. Failure leaves the session intact so the
-  // user can hit Retry without losing scroll position.
   const fetchOlderMessages = useCallback(async (cwd: string, sid: string) => {
     if (!selectedKey) return;
     const skey = `${cwd}::${sid}`;
-    // Synchronous single-flight gate (see fetchCWDPage for the rationale).
     if (inFlightMessagesRef.current.has(skey)) return;
 
     const group = detail?.groups.find((g) => g.cwd === cwd);
@@ -408,12 +472,29 @@ export function PromptsPage() {
       return next;
     });
 
+    // Capture scrollHeight BEFORE the fetch — useLayoutEffect below adjusts
+    // scrollTop by the delta after the new messages render, which keeps the
+    // user pinned to the same logical row instead of jumping to the top of
+    // the prepended block. Only captures when we're paging the currently-
+    // selected session; otherwise the user can't see the list anyway.
+    const isCurrent =
+      selectedSessionRef && selectedSessionRef.cwd === cwd && selectedSessionRef.sid === sid;
+    if (isCurrent && messagesScrollRef.current) {
+      pendingScrollAnchor.current = messagesScrollRef.current.scrollHeight;
+    }
+
     try {
       const res = await promptsApi.loadOlderMessages(selectedKey, cwd, sid, oldestTs, DEFAULT_LIMIT);
       const got = res.groups[0]?.sessions[0];
+      // Track whether the merge will actually grow messages.length, since
+      // the scroll-anchor consumer is the layout effect on that length.
+      // If no growth happens (server returned nothing, or every message
+      // was already in the window via dedup) the layout effect never
+      // fires, and a leftover anchor would mis-adjust the NEXT load-more
+      // using a scrollHeight from the wrong moment in time.
+      let addedCount = 0;
       setDetail((prev) => {
         if (!prev) return prev;
-        // Stale-key guard — same reason as the CWD-level fetchers.
         if (res.key_hash !== prev.key_hash) return prev;
         const gIdx = prev.groups.findIndex((g) => g.cwd === cwd);
         if (gIdx < 0) return prev;
@@ -421,35 +502,34 @@ export function PromptsPage() {
         if (sIdx < 0) return prev;
         const existingSess = prev.groups[gIdx].sessions[sIdx];
         if (!got) {
-          // Server returned no session — usually means cursor walked past
-          // the start. Just clear `truncated` so the button hides.
           const sessions = prev.groups[gIdx].sessions.slice();
           sessions[sIdx] = { ...existingSess, truncated: false };
           const groups = prev.groups.slice();
           groups[gIdx] = { ...prev.groups[gIdx], sessions };
           return { ...prev, groups };
         }
-        // Composite dedup key: `tool_use` and `tool_result` (and parallel
-        // tool calls) routinely share `ts` to the millisecond; a ts-only
-        // dedup would silently drop the second of each pair. Role +
-        // prompt-prefix is cheap and unique enough in practice.
         const dedupKey = (m: PromptMessage) =>
           `${m.ts}|${m.role ?? ''}|${(m.prompt ?? '').slice(0, 32)}`;
         const seen = new Set(existingSess.messages.map(dedupKey));
         const older = got.messages.filter((m) => !seen.has(dedupKey(m)));
+        addedCount = older.length;
         const sessions = prev.groups[gIdx].sessions.slice();
         sessions[sIdx] = {
           ...existingSess,
           messages: [...older, ...existingSess.messages],
-          // Server's truncated flag is the source of truth post-merge.
           truncated: got.truncated ?? false,
         };
         const groups = prev.groups.slice();
         groups[gIdx] = { ...prev.groups[gIdx], sessions };
         return { ...prev, groups };
       });
+      if (addedCount === 0) {
+        // No length change → layout effect won't fire → anchor would leak.
+        pendingScrollAnchor.current = null;
+      }
       if (got) prewarmTemplates([got]);
     } catch (err) {
+      pendingScrollAnchor.current = null;
       const msg = getErrorMessage(err, t('notification.refresh_failed'));
       setMessageLoadErrors((prev) => ({ ...prev, [skey]: msg }));
     } finally {
@@ -461,38 +541,20 @@ export function PromptsPage() {
         return next;
       });
     }
-  }, [selectedKey, detail, t, prewarmTemplates]);
+  }, [selectedKey, detail, selectedSessionRef, t, prewarmTemplates]);
 
   const handleRefresh = useCallback(async () => {
     await loadUsers();
     if (!selectedKey) return;
-    // Non-destructive: pull CWD-level meta (message_count, last_seen,
-    // session_count, has_more) and merge in place, keeping any sessions
-    // the user has already paged into. This lets a user reload activity
-    // without losing their place in a deep CWD they were exploring.
     try {
       const res = await promptsApi.refreshHeaders(selectedKey);
       setDetail((prev) => {
-        if (!prev) return res; // first time → adopt as-is
-        // Stale-response guard (same reason as fetchCWDPage). If selectedKey
-        // changed while the refresh was in flight, prev now describes a
-        // different user; merging would poison their tree.
+        if (!prev) return res;
         if (res.key_hash !== prev.key_hash) return prev;
-        // Build the merged groups list by walking the RESPONSE first so
-        // its order (most-recent-CWD first) wins. Then APPEND any CWDs
-        // that were in state but missing from the response — file
-        // rotation or a transient writer race can drop a CWD for a
-        // single tick, and silently throwing away the user's already-
-        // loaded sessions in that window is worse than carrying a
-        // potentially stale group for one extra refresh.
         const respCwds = new Set(res.groups.map((g) => g.cwd));
         const merged: PromptCWDGroup[] = res.groups.map((g) => {
           const existing = prev.groups.find((p) => p.cwd === g.cwd);
-          if (!existing) {
-            // Brand-new CWD since last load → stays lazy; expand will fetch.
-            return g;
-          }
-          // Preserve already-loaded sessions; only refresh the meta.
+          if (!existing) return g;
           return {
             ...existing,
             message_count: g.message_count,
@@ -523,9 +585,87 @@ export function PromptsPage() {
     loadDetail(selectedKey);
   }, [selectedKey, loadDetail]);
 
+  // Search effect. Triggered on deferredQuery so rapid typing collapses to a
+  // single fetch. Below-min-chars is a no-op here because the input's
+  // onChange already cleared state synchronously AND bumped searchSeqRef so
+  // any in-flight older request bails when it resolves.
+  //
+  // setSearchLoading(true) is called synchronously from the effect body —
+  // tripping react-hooks/set-state-in-effect, matched by the rest of the
+  // file's loadUsers/loadDetail pattern. The earlier microtask wrapper was
+  // cargo-culted around the lint rule without solving anything; explicit
+  // suppression with rationale is honest.
+  useEffect(() => {
+    const q = deferredQuery.trim();
+    if (!selectedKey || q.length < SEARCH_MIN_CHARS) return;
+    const seq = ++searchSeqRef.current;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- visible spinner during async fetch
+    setSearchLoading(true);
+    promptsApi
+      .searchMessages(selectedKey, q, SEARCH_LIMIT)
+      .then((res) => {
+        if (searchSeqRef.current !== seq) return;
+        setSearchResults(res);
+        setSearchError('');
+      })
+      .catch((err) => {
+        if (searchSeqRef.current !== seq) return;
+        setSearchResults(null);
+        setSearchError(getErrorMessage(err, t('notification.refresh_failed')));
+      })
+      .finally(() => {
+        if (searchSeqRef.current !== seq) return;
+        setSearchLoading(false);
+      });
+  }, [deferredQuery, selectedKey, t]);
+
+  // Scroll memory: on session change, restore saved scrollTop if we've seen
+  // this session before, else jump to bottom (latest message). Skipped while
+  // search mode is active because the list is search hits, not chronological.
+  useLayoutEffect(() => {
+    const el = messagesScrollRef.current;
+    if (!el || !selectedSession || searchResults) return;
+    const key = `${detail?.key_hash ?? ''}::${selectedSession.session_id}`;
+    if (sessionsSeenRef.current.has(key)) {
+      const saved = scrollPosByKey.current.get(key);
+      if (saved !== undefined) el.scrollTop = saved;
+    } else {
+      el.scrollTop = el.scrollHeight;
+      sessionsSeenRef.current.add(key);
+    }
+    // Effect deps: when search closes (searchResults goes null) we want to
+    // restore the saved scroll position too, so include searchResults.
+  }, [selectedSession, searchResults, detail?.key_hash]);
+
+  // Pagination anchor: after older messages are prepended, the messages list
+  // grows but the user expects to stay at their previous row. Adjust scrollTop
+  // by the height delta. Runs only when an anchor was captured (i.e. user
+  // triggered load-older). selectedSession.messages.length is the trigger.
+  const currentMessagesLen = selectedSession?.messages.length ?? 0;
+  useLayoutEffect(() => {
+    const el = messagesScrollRef.current;
+    if (!el || pendingScrollAnchor.current === null) return;
+    const oldHeight = pendingScrollAnchor.current;
+    pendingScrollAnchor.current = null;
+    const delta = el.scrollHeight - oldHeight;
+    if (delta > 0) el.scrollTop += delta;
+  }, [currentMessagesLen]);
+
+  // Persist scrollTop on scroll so re-selecting the session restores position.
+  // Uses rAF coalescing so a fast scroll doesn't fire 60 writes per second.
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesScrollRef.current;
+    if (!el || !selectedSession || searchResults) return;
+    const key = `${detail?.key_hash ?? ''}::${selectedSession.session_id}`;
+    scrollPosByKey.current.set(key, el.scrollTop);
+  }, [selectedSession, searchResults, detail?.key_hash]);
+
   const handleSelectUser = (u: PromptUserSummary) => {
     setSelectedKey(u.key_hash);
     setPasteInput('');
+    // Auto-collapse the keys list once a key is picked so the CWD/sessions
+    // tree gets the vertical space. The user can re-expand via Change.
+    setKeysListExpanded(false);
   };
 
   const handlePasteSubmit = (e: React.FormEvent) => {
@@ -533,15 +673,10 @@ export function PromptsPage() {
     const trimmed = pasteInput.trim();
     if (!trimmed) return;
     setSelectedKey(trimmed);
+    setKeysListExpanded(false);
   };
 
   const toggleCWD = (cwd: string) => {
-    // Decide direction from the LATEST committed state, not from inside
-    // the updater. React 18 StrictMode invokes updaters twice in dev; a
-    // fetch fired from inside the updater would fire twice because the
-    // first call's `setLoadingMoreCWDs` hasn't committed by the time the
-    // second updater pass runs the `.has(cwd)` guard. Keep the updater
-    // pure; dispatch the side effect from out here.
     const willOpen = !expandedCWDs.has(cwd);
     setExpandedCWDs((prev) => {
       const next = new Set(prev);
@@ -549,10 +684,6 @@ export function PromptsPage() {
       else next.delete(cwd);
       return next;
     });
-    // Lazy CWDs (overview past initial_cwds, or new ones from refresh)
-    // come back with empty sessions + has_more=true. The expand action is
-    // the trigger to fetch their first page — modeled on Finder / VS Code
-    // tree expansion. Skip if already loading or if collapsing.
     if (willOpen && selectedKey) {
       const group = detail?.groups.find((g) => g.cwd === cwd);
       if (group && group.sessions.length === 0 && group.has_more && !loadingMoreCWDs.has(cwd)) {
@@ -563,7 +694,7 @@ export function PromptsPage() {
 
   const cursorOf = (s: PromptSession) => ({ ts: s.last_seen, sid: s.session_id });
 
-  const handleLoadOlder = (cwd: string) => {
+  const handleLoadOlderSessions = (cwd: string) => {
     if (!selectedKey) return;
     const group = detail?.groups.find((g) => g.cwd === cwd);
     if (!group || group.sessions.length === 0) return;
@@ -576,36 +707,89 @@ export function PromptsPage() {
     if (!selectedKey) return;
     const group = detail?.groups.find((g) => g.cwd === cwd);
     if (!group) return;
-    // Retry resumes from wherever we stopped: first page if no sessions
-    // loaded yet, else after the oldest already-loaded session.
     const cursor = group.sessions.length > 0
       ? cursorOf(group.sessions[group.sessions.length - 1])
       : undefined;
     void fetchCWDPage(selectedKey, cwd, cursor);
   };
 
-  const sessionKey = (cwd: string, sid: string) => `${cwd}::${sid}`;
-
-  const toggleSession = (key: string) => {
-    setExpandedSessions((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  const handleSelectSession = (cwd: string, sid: string) => {
+    setSelectedSessionRef({ cwd, sid });
+    setSelectedMessageTs(null);
+    setExpandedTemplateInDetail(false);
   };
 
-  const handleSelectMessage = (sess: PromptSession, msg: PromptMessage) => {
-    setSelectedSession(sess);
-    setSelectedMessage(msg);
+  const handleSelectMessage = (msg: PromptMessage) => {
+    setSelectedMessageTs(msg.ts);
     setExpandedTemplateInDetail(false);
-    // Pre-warm cache so the detail panel renders the body without flicker.
     if (msg.prompt_template) void fetchTemplate(msg.prompt_template);
   };
 
   const closeDetail = () => {
-    setSelectedMessage(null);
-    setSelectedSession(null);
+    setSelectedMessageTs(null);
+  };
+
+  // Search-hit click: deep-link into the session referenced by the hit,
+  // then select the matching message. If the session isn't in the loaded
+  // detail (CWD not expanded yet, or session past the loaded page), fire a
+  // CWD fetch and expand it — the user may need to click again. PR1 keeps
+  // it best-effort; chasing arbitrary-depth pagination from a search jump
+  // is out of scope.
+  const handleSelectSearchHit = (hit: PromptSearchHit) => {
+    if (!detail) return;
+    setExpandedCWDs((prev) => {
+      if (prev.has(hit.cwd)) return prev;
+      const next = new Set(prev);
+      next.add(hit.cwd);
+      return next;
+    });
+    const group = detail.groups.find((g) => g.cwd === hit.cwd);
+    if (!group) return;
+    const sess = group.sessions.find((s) => s.session_id === hit.session_id);
+    if (!sess) {
+      // Session not loaded — surface that to the user via the per-CWD
+      // error slot (instead of silently no-op'ing) and kick off a fetch
+      // so the next click can land. Two-click is acceptable for the
+      // edge case; the visible feedback is the important part.
+      if (selectedKey && group.has_more) {
+        setCwdLoadErrors((prev) => ({
+          ...prev,
+          [hit.cwd]: t('prompts_page.search_jump_needs_load', {
+            defaultValue: 'Session not loaded — fetching more sessions, click the search hit again afterwards.',
+          }),
+        }));
+        void fetchCWDPage(selectedKey, hit.cwd);
+      }
+      return;
+    }
+    setSelectedSessionRef({ cwd: hit.cwd, sid: hit.session_id });
+    // Mark seen so the bottom-scroll-on-first-select path doesn't fire —
+    // we want to land on the matched message, not the bottom.
+    const key = `${detail.key_hash}::${sess.session_id}`;
+    sessionsSeenRef.current.add(key);
+    // Close search; bump the seq so any in-flight fetch is muted.
+    searchSeqRef.current++;
+    setSearchQuery('');
+    setSearchResults(null);
+    setSearchError('');
+    setSearchLoading(false);
+
+    // Select the message if it's in the loaded window. If not (older than
+    // currently-paged), just switch to the session — user can Load older.
+    const target = sess.messages.find((m) => m.ts === hit.ts);
+    if (target) {
+      setSelectedMessageTs(target.ts);
+      if (target.prompt_template) void fetchTemplate(target.prompt_template);
+      // Scroll into view AFTER the layout pass. requestAnimationFrame ensures
+      // the new selectedSession has rendered its rows so the data-attr query
+      // finds something.
+      requestAnimationFrame(() => {
+        const el = document.querySelector<HTMLElement>(
+          `[data-message-key="${CSS.escape(sess.session_id)}::${CSS.escape(target.ts)}"]`,
+        );
+        el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      });
+    }
   };
 
   const messageKey = (sid: string, ts: string) => `${sid}::${ts}`;
@@ -614,10 +798,26 @@ export function PromptsPage() {
       selectedSession && selectedMessage
         ? messageKey(selectedSession.session_id, selectedMessage.ts)
         : '',
-    [selectedSession, selectedMessage]
+    [selectedSession, selectedMessage],
   );
 
   const showDetailColumn = !!selectedMessage;
+
+  // Filter keys by hint substring. Lowercased so the filter is case-
+  // insensitive. Empty filter → full list.
+  const filteredUsers = useMemo(() => {
+    const q = keysFilter.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter((u) => {
+      const hint = (u.key_hint || u.key_hash).toLowerCase();
+      return hint.includes(q);
+    });
+  }, [users, keysFilter]);
+
+  const selectedUser = useMemo(
+    () => users.find((u) => u.key_hash === selectedKey) ?? null,
+    [users, selectedKey],
+  );
 
   return (
     <div className={styles.container}>
@@ -672,88 +872,253 @@ export function PromptsPage() {
       )}
 
       <div className={`${styles.layout} ${showDetailColumn ? styles.withDetail : ''} ${keysCollapsed ? styles.collapsedKeys : ''}`}>
-        {/* LEFT: user list (collapses to a thin rail with just the expand
-            toggle, freeing horizontal space for the sessions column) */}
+        {/* LEFT: keys list (filterable, collapsible to selected-key chip)
+            stacked over CWD/sessions tree of the active key. */}
         {keysCollapsed ? (
           <div className={styles.collapsedColumn}>
             <button
               type="button"
               className={styles.collapseToggle}
               onClick={toggleKeysCollapsed}
-              aria-label={t('prompts_page.keys_expand', { defaultValue: 'Show API keys panel' })}
-              title={t('prompts_page.keys_expand', { defaultValue: 'Show API keys panel' })}
+              aria-label={t('prompts_page.keys_expand', { defaultValue: 'Show navigation panel' })}
+              title={t('prompts_page.keys_expand', { defaultValue: 'Show navigation panel' })}
             >
               <IconChevronLeft size={14} style={{ transform: 'rotate(180deg)' }} />
             </button>
           </div>
         ) : (
         <div className={styles.column}>
-          <div className={styles.columnHeader}>
-            <span>{t('prompts_page.users', { defaultValue: 'API keys' })}</span>
-            <span className={styles.badge}>{users.length}</span>
-            <button
-              type="button"
-              className={styles.collapseToggle}
-              onClick={toggleKeysCollapsed}
-              aria-label={t('prompts_page.keys_collapse', { defaultValue: 'Hide API keys panel' })}
-              title={t('prompts_page.keys_collapse', { defaultValue: 'Hide API keys panel' })}
-            >
-              <IconChevronLeft size={14} />
-            </button>
-          </div>
-          <form onSubmit={handlePasteSubmit} className={styles.pasteRow}>
-            <Input
-              value={pasteInput}
-              onChange={(e) => setPasteInput(e.target.value)}
-              placeholder={t('prompts_page.paste_placeholder', {
-                defaultValue: 'Paste API key or 12-char hash…',
-              })}
-              className={styles.pasteInput}
-            />
-            <span className={styles.pasteHint}>
-              {t('prompts_page.paste_hint', {
-                defaultValue: 'Press Enter to look up a key outside the configured list.',
-              })}
-            </span>
-          </form>
-          <div className={styles.columnBody}>
-            {usersLoading ? (
-              <div className={styles.loading}><LoadingSpinner /></div>
-            ) : users.length === 0 ? (
-              <EmptyState
-                title={t('prompts_page.no_users_title', { defaultValue: 'No keys with prompt data' })}
-                description={t('prompts_page.no_users_desc', {
-                  defaultValue: 'Configure API keys and enable prompt_log to start capturing.',
-                })}
-              />
-            ) : (
-              <div className={styles.userList}>
-                {users.map((u) => (
-                  <button
-                    key={u.key_hash}
-                    type="button"
-                    className={`${styles.userRow} ${selectedKey === u.key_hash ? styles.selected : ''}`}
-                    onClick={() => handleSelectUser(u)}
-                  >
-                    <span className={styles.userKeyHint}>
-                      {u.key_hint || u.key_hash}
-                      {!u.configured && <span className={styles.badgeWarn}>orphan</span>}
-                    </span>
-                    <span className={styles.userMeta}>
-                      <span className={styles.userMetaItem}>{u.message_count} msgs</span>
-                      <span className={styles.userMetaItem}>{u.session_count} sess</span>
-                      <span className={styles.userMetaItem}>{u.cwd_count} cwds</span>
-                      <span className={styles.userMetaItem}>{relativeTime(u.last_seen)}</span>
-                    </span>
-                  </button>
-                ))}
+          {/* Keys section. Collapses to a compact bar once a key is selected
+              so the tree below has room to breathe. */}
+          {keysListExpanded || !selectedKey ? (
+            <>
+              <div className={styles.columnHeader}>
+                <span>{t('prompts_page.users', { defaultValue: 'API keys' })}</span>
+                <span className={styles.badge}>{users.length}</span>
+                <button
+                  type="button"
+                  className={styles.collapseToggle}
+                  onClick={toggleKeysCollapsed}
+                  aria-label={t('prompts_page.keys_collapse', { defaultValue: 'Hide navigation panel' })}
+                  title={t('prompts_page.keys_collapse', { defaultValue: 'Hide navigation panel' })}
+                >
+                  <IconChevronLeft size={14} />
+                </button>
               </div>
-            )}
-          </div>
+              <div className={styles.keysFilterRow}>
+                <Input
+                  value={keysFilter}
+                  onChange={(e) => setKeysFilter(e.target.value)}
+                  placeholder={t('prompts_page.keys_filter_placeholder', {
+                    defaultValue: 'Filter keys…',
+                  })}
+                  className={styles.keysFilterInput}
+                  rightElement={
+                    keysFilter ? (
+                      <button
+                        type="button"
+                        className={styles.searchClear}
+                        onClick={() => setKeysFilter('')}
+                        aria-label="Clear filter"
+                      >
+                        <IconX size={12} />
+                      </button>
+                    ) : (
+                      <IconSearch size={12} />
+                    )
+                  }
+                />
+              </div>
+              <form onSubmit={handlePasteSubmit} className={styles.pasteRow}>
+                <Input
+                  value={pasteInput}
+                  onChange={(e) => setPasteInput(e.target.value)}
+                  placeholder={t('prompts_page.paste_placeholder', {
+                    defaultValue: 'Paste API key or 12-char hash…',
+                  })}
+                  className={styles.pasteInput}
+                />
+                <span className={styles.pasteHint}>
+                  {t('prompts_page.paste_hint', {
+                    defaultValue: 'Press Enter to look up a key outside the configured list.',
+                  })}
+                </span>
+              </form>
+              <div className={styles.keysListBody}>
+                {usersLoading ? (
+                  <div className={styles.loading}><LoadingSpinner /></div>
+                ) : filteredUsers.length === 0 ? (
+                  users.length === 0 ? (
+                    <EmptyState
+                      title={t('prompts_page.no_users_title', { defaultValue: 'No keys with prompt data' })}
+                      description={t('prompts_page.no_users_desc', {
+                        defaultValue: 'Configure API keys and enable prompt_log to start capturing.',
+                      })}
+                    />
+                  ) : (
+                    <div className={styles.placeholder}>
+                      {t('prompts_page.keys_filter_empty', {
+                        defaultValue: 'No keys match the filter.',
+                      })}
+                    </div>
+                  )
+                ) : (
+                  <div className={styles.userList}>
+                    {filteredUsers.map((u) => (
+                      <button
+                        key={u.key_hash}
+                        type="button"
+                        className={`${styles.userRow} ${selectedKey === u.key_hash ? styles.selected : ''}`}
+                        onClick={() => handleSelectUser(u)}
+                      >
+                        <span className={styles.userKeyHint}>
+                          {u.key_hint || u.key_hash}
+                          {!u.configured && <span className={styles.badgeWarn}>orphan</span>}
+                        </span>
+                        <span className={styles.userMeta}>
+                          <span className={styles.userMetaItem}>{u.message_count} msgs</span>
+                          <span className={styles.userMetaItem}>{u.session_count} sess</span>
+                          <span className={styles.userMetaItem}>{u.cwd_count} cwds</span>
+                          <span className={styles.userMetaItem}>{relativeTime(u.last_seen)}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className={styles.keysCollapsedBar}>
+              <div className={styles.keysCollapsedSummary}>
+                <span className={styles.keysCollapsedHint}>
+                  {selectedUser?.key_hint || selectedUser?.key_hash || selectedKey}
+                  {selectedUser && !selectedUser.configured && (
+                    <span className={styles.badgeWarn}>orphan</span>
+                  )}
+                </span>
+                {selectedUser && (
+                  <span className={styles.keysCollapsedMeta}>
+                    {selectedUser.message_count} msgs · {selectedUser.session_count} sess
+                  </span>
+                )}
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setKeysListExpanded(true)}
+              >
+                {t('prompts_page.change_key', { defaultValue: 'Change' })}
+              </Button>
+            </div>
+          )}
+
+          {/* CWD / sessions tree of the active key. Hidden until a key is
+              selected (the keys list takes the whole column then). */}
+          {selectedKey && !keysListExpanded && (
+            <div className={styles.treeBody}>
+              {detailLoading ? (
+                <div className={styles.loading}><LoadingSpinner /></div>
+              ) : !detail || detail.groups.length === 0 ? (
+                <EmptyState
+                  title={t('prompts_page.no_prompts_title', { defaultValue: 'No prompts captured' })}
+                  description={t('prompts_page.no_prompts_desc', {
+                    defaultValue: 'This key has no logged messages yet.',
+                  })}
+                />
+              ) : (
+                <div className={styles.tree}>
+                  {detail.groups.map((group) => {
+                    const open = expandedCWDs.has(group.cwd);
+                    const label = formatCwdLabel(group.cwd);
+                    return (
+                      <div key={group.cwd} className={styles.cwdGroup}>
+                        <button
+                          type="button"
+                          className={styles.cwdHeader}
+                          onClick={() => toggleCWD(group.cwd)}
+                          title={label.full}
+                        >
+                          <span className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}>
+                            <IconChevronDown size={12} />
+                          </span>
+                          <span className={styles.cwdPath}>{label.short}</span>
+                          <span className={styles.badge}>
+                            {group.message_count}m · {group.session_count}s
+                          </span>
+                        </button>
+                        {open && (
+                          <div className={styles.sessionList}>
+                            {group.sessions.map((sess) => {
+                              const firstMsg = sess.messages[0];
+                              const firstTplHash = firstMsg?.prompt_template;
+                              const firstTpl = firstTplHash ? templateCache[firstTplHash] : undefined;
+                              const firstSuffix = (firstMsg?.prompt ?? '').replace(/\s+/g, ' ').trim();
+                              const titleText =
+                                firstSuffix ||
+                                (firstTplHash ? `📋 ${firstTpl?.label || firstTplHash}` : '(no messages)');
+                              const isActive =
+                                selectedSessionRef?.cwd === group.cwd &&
+                                selectedSessionRef?.sid === sess.session_id;
+                              return (
+                                <button
+                                  key={sess.session_id}
+                                  type="button"
+                                  className={`${styles.sessionRow} ${isActive ? styles.sessionRowActive : ''}`}
+                                  onClick={() => handleSelectSession(group.cwd, sess.session_id)}
+                                  title={sess.session_id}
+                                >
+                                  <span className={styles.sessionTitle}>{titleText}</span>
+                                  <span className={styles.sessionMeta}>
+                                    <span className={styles.badge}>{sess.message_count}m</span>
+                                    <span className={styles.sessionTime}>
+                                      {relativeTime(sess.last_seen)}
+                                    </span>
+                                  </span>
+                                </button>
+                              );
+                            })}
+                            {loadingMoreCWDs.has(group.cwd) && (
+                              <div className={styles.cwdLoading}>
+                                <LoadingSpinner />
+                              </div>
+                            )}
+                            {!loadingMoreCWDs.has(group.cwd) && cwdLoadErrors[group.cwd] && (
+                              <div className={styles.cwdError}>
+                                <span>{cwdLoadErrors[group.cwd]}</span>
+                                <Button variant="ghost" size="sm" onClick={() => handleRetryCWD(group.cwd)}>
+                                  {t('prompts_page.retry', { defaultValue: 'Retry' })}
+                                </Button>
+                              </div>
+                            )}
+                            {!loadingMoreCWDs.has(group.cwd)
+                              && !cwdLoadErrors[group.cwd]
+                              && group.sessions.length > 0
+                              && group.has_more && (
+                              <button
+                                type="button"
+                                className={styles.loadMoreRow}
+                                onClick={() => handleLoadOlderSessions(group.cwd)}
+                              >
+                                {t('prompts_page.load_more_sessions', {
+                                  defaultValue: 'Load {{n}} more sessions',
+                                  n: Math.max(0, group.session_count - group.sessions.length),
+                                })}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         )}
 
-        {/* MIDDLE: tree */}
+        {/* MIDDLE: reading pane for the selected session, or search results
+            when the search input has content. */}
         <div className={styles.column}>
           <div className={styles.columnHeader}>
             <span>
@@ -767,7 +1132,59 @@ export function PromptsPage() {
               </span>
             )}
           </div>
-          <div className={styles.columnBody}>
+          {selectedKey && (
+            <div className={styles.searchRow}>
+              <Input
+                value={searchQuery}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setSearchQuery(v);
+                  // When the input shrinks below the min, drop stale
+                  // results immediately so the reading pane returns to
+                  // session mode without waiting for the deferred effect
+                  // to fire. Also bump searchSeqRef so any in-flight
+                  // older-query response bails on resolution instead of
+                  // re-populating the now-cleared state under a query
+                  // the user has already moved past.
+                  if (v.trim().length < SEARCH_MIN_CHARS) {
+                    searchSeqRef.current++;
+                    setSearchResults(null);
+                    setSearchError('');
+                    setSearchLoading(false);
+                  }
+                }}
+                placeholder={t('prompts_page.search_placeholder', {
+                  defaultValue: 'Search messages in this key…',
+                })}
+                className={styles.searchInput}
+                rightElement={
+                  searchQuery ? (
+                    <button
+                      type="button"
+                      className={styles.searchClear}
+                      onClick={() => {
+                        searchSeqRef.current++;
+                        setSearchQuery('');
+                        setSearchResults(null);
+                        setSearchError('');
+                        setSearchLoading(false);
+                      }}
+                      aria-label="Clear search"
+                    >
+                      <IconX size={12} />
+                    </button>
+                  ) : (
+                    <IconSearch size={12} />
+                  )
+                }
+              />
+            </div>
+          )}
+          <div
+            className={styles.readingPane}
+            ref={messagesScrollRef}
+            onScroll={handleMessagesScroll}
+          >
             {!selectedKey ? (
               <div className={styles.placeholder}>
                 {t('prompts_page.placeholder_left', {
@@ -776,211 +1193,42 @@ export function PromptsPage() {
               </div>
             ) : detailLoading ? (
               <div className={styles.loading}><LoadingSpinner /></div>
-            ) : !detail || detail.groups.length === 0 ? (
-              <EmptyState
-                title={t('prompts_page.no_prompts_title', { defaultValue: 'No prompts captured' })}
-                description={t('prompts_page.no_prompts_desc', {
-                  defaultValue: 'This key has no logged messages yet.',
-                })}
+            ) : searchResults || searchLoading || searchError ? (
+              <SearchResultsView
+                loading={searchLoading}
+                error={searchError}
+                results={searchResults}
+                query={deferredQuery}
+                onSelectHit={handleSelectSearchHit}
               />
-            ) : (
-              <div className={styles.tree}>
-                {detail.groups.map((group) => {
-                  const open = expandedCWDs.has(group.cwd);
-                  return (
-                    <div key={group.cwd} className={styles.cwdGroup}>
-                      <button
-                        type="button"
-                        className={styles.cwdHeader}
-                        onClick={() => toggleCWD(group.cwd)}
-                      >
-                        <span className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}>
-                          <IconChevronDown size={12} />
-                        </span>
-                        <span className={styles.cwdPath}>{group.cwd}</span>
-                        <span className={styles.badge}>
-                          {group.message_count}m · {group.session_count}s
-                        </span>
-                      </button>
-                      {open && (
-                        <div className={styles.sessionList}>
-                          {group.sessions.map((sess) => {
-                            const skey = sessionKey(group.cwd, sess.session_id);
-                            const sessOpen = expandedSessions.has(skey);
-                            const firstMsg = sess.messages[0];
-                            const firstTplHash = firstMsg?.prompt_template;
-                            const firstTpl = firstTplHash ? templateCache[firstTplHash] : undefined;
-                            const firstSuffix = (firstMsg?.prompt ?? '').replace(/\s+/g, ' ').trim();
-                            const titleText =
-                              firstSuffix ||
-                              (firstTplHash ? `📋 ${firstTpl?.label || firstTplHash}` : '(no messages)');
-                            return (
-                              <div key={sess.session_id} className={styles.sessionCard}>
-                                <button
-                                  type="button"
-                                  className={styles.sessionToggle}
-                                  onClick={() => toggleSession(skey)}
-                                  title={sess.session_id}
-                                >
-                                  <span className={`${styles.chevron} ${styles.chevronSm} ${sessOpen ? styles.chevronOpen : ''}`}>
-                                    <IconChevronDown size={10} />
-                                  </span>
-                                  <span className={styles.sessionTitle}>{titleText}</span>
-                                  <span className={styles.badge}>{sess.message_count}m</span>
-                                  <span className={styles.sessionTime}>
-                                    {relativeTime(sess.last_seen)}
-                                  </span>
-                                </button>
-                                {sessOpen && (
-                                  <>
-                                    <div className={styles.sessionHead}>
-                                      <span className={styles.badge}>{sess.client || 'unknown'}</span>
-                                      {sess.client_version && (
-                                        <span className={styles.badge}>{sess.client_version}</span>
-                                      )}
-                                      {sess.models.map((m) => (
-                                        <span key={m} className={styles.badge}>{m}</span>
-                                      ))}
-                                      <span className={styles.sessionId} title={sess.session_id}>
-                                        {sess.session_id}
-                                      </span>
-                                    </div>
-                                    <div className={styles.messageList}>
-                                      {sess.truncated && (() => {
-                                        const skey = sessionKey(group.cwd, sess.session_id);
-                                        const loading = loadingMoreMessages.has(skey);
-                                        const err = messageLoadErrors[skey];
-                                        const remaining = Math.max(
-                                          0,
-                                          sess.message_count - sess.messages.length
-                                        );
-                                        if (loading) {
-                                          return (
-                                            <div className={styles.cwdLoading}>
-                                              <LoadingSpinner />
-                                            </div>
-                                          );
-                                        }
-                                        if (err) {
-                                          return (
-                                            <div className={styles.cwdError}>
-                                              <span>{err}</span>
-                                              <Button
-                                                variant="ghost"
-                                                size="sm"
-                                                onClick={() => fetchOlderMessages(group.cwd, sess.session_id)}
-                                              >
-                                                {t('prompts_page.retry', { defaultValue: 'Retry' })}
-                                              </Button>
-                                            </div>
-                                          );
-                                        }
-                                        return (
-                                          <button
-                                            type="button"
-                                            className={styles.loadMoreRow}
-                                            onClick={() => fetchOlderMessages(group.cwd, sess.session_id)}
-                                          >
-                                            {t('prompts_page.load_more_messages', {
-                                              defaultValue: 'Load {{n}} more messages',
-                                              n: remaining,
-                                            })}
-                                          </button>
-                                        );
-                                      })()}
-                                      {sess.messages.map((msg) => {
-                                        const key = messageKey(sess.session_id, msg.ts);
-                                        const isSelected = key === selectedMessageKey;
-                                        const tplHash = msg.prompt_template;
-                                        const tpl = tplHash ? templateCache[tplHash] : undefined;
-                                        const tplLabel = tpl?.label;
-                                        const tplLen = tpl?.len;
-                                        const suffix = (msg.prompt ?? '').replace(/\s+/g, ' ');
-                                        // Empty / unset role is treated as "user" so legacy
-                                        // logs (written before assistant capture existed)
-                                        // still get the prominent rail.
-                                        const isAssistant = msg.role === 'assistant';
-                                        const roleClass = isAssistant ? styles.assistantMsg : styles.userMsg;
-                                        const isSub = msg.is_subagent === true;
-                                        const subID = msg.subagent_id ?? '';
-                                        const rowClass = [
-                                          styles.messageRow,
-                                          roleClass,
-                                          isSub ? styles.subagentMsg : '',
-                                          isSelected ? styles.selectedMsg : '',
-                                        ]
-                                          .filter(Boolean)
-                                          .join(' ');
-                                        return (
-                                          <button
-                                            key={key}
-                                            type="button"
-                                            className={rowClass}
-                                            onClick={() => handleSelectMessage(sess, msg)}
-                                          >
-                                            <span className={styles.msgTime}>{timeOfDay(msg.ts)}</span>
-                                            <span className={styles.msgText}>
-                                              {isSub && (
-                                                <span
-                                                  className={styles.subagentChip}
-                                                  title={`Subagent ${subID || '(no id)'}`}
-                                                >
-                                                  ↳ subagent{subID ? ` · ${subID.slice(0, 6)}` : ''}
-                                                </span>
-                                              )}
-                                              {tplHash && (
-                                                <span className={styles.tplChip} title={tpl?.text || `template ${tplHash}`}>
-                                                  {tplLabel ? `📋 ${tplLabel}` : `📋 ${tplHash}`}
-                                                  {tplLen ? ` · ${tplLen}c` : ''}
-                                                </span>
-                                              )}
-                                              {suffix.slice(0, 200) || (tplHash ? '' : '(empty)')}
-                                            </span>
-                                          </button>
-                                        );
-                                      })}
-                                    </div>
-                                  </>
-                                )}
-                              </div>
-                            );
-                          })}
-                          {loadingMoreCWDs.has(group.cwd) && (
-                            <div className={styles.cwdLoading}>
-                              <LoadingSpinner />
-                            </div>
-                          )}
-                          {!loadingMoreCWDs.has(group.cwd) && cwdLoadErrors[group.cwd] && (
-                            <div className={styles.cwdError}>
-                              <span>{cwdLoadErrors[group.cwd]}</span>
-                              <Button variant="ghost" size="sm" onClick={() => handleRetryCWD(group.cwd)}>
-                                {t('prompts_page.retry', { defaultValue: 'Retry' })}
-                              </Button>
-                            </div>
-                          )}
-                          {!loadingMoreCWDs.has(group.cwd) && !cwdLoadErrors[group.cwd] && group.sessions.length > 0 && group.has_more && (
-                            <button
-                              type="button"
-                              className={styles.loadMoreRow}
-                              onClick={() => handleLoadOlder(group.cwd)}
-                            >
-                              {t('prompts_page.load_more_sessions', {
-                                defaultValue: 'Load {{n}} more sessions',
-                                n: Math.max(0, group.session_count - group.sessions.length),
-                              })}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
+            ) : !selectedSession ? (
+              <div className={styles.placeholder}>
+                {t('prompts_page.no_session_selected', {
+                  defaultValue: 'Select a session to view its messages.',
                 })}
               </div>
+            ) : (
+              <SessionReadingPane
+                session={selectedSession}
+                cwd={selectedSessionRef?.cwd ?? '(unknown)'}
+                templateCache={templateCache}
+                selectedMessageKey={selectedMessageKey}
+                onSelectMessage={handleSelectMessage}
+                onLoadOlder={fetchOlderMessages}
+                loadingOlder={loadingMoreMessages.has(
+                  `${selectedSessionRef?.cwd ?? ''}::${selectedSessionRef?.sid ?? ''}`,
+                )}
+                loadError={
+                  messageLoadErrors[
+                    `${selectedSessionRef?.cwd ?? ''}::${selectedSessionRef?.sid ?? ''}`
+                  ]
+                }
+              />
             )}
           </div>
         </div>
 
-        {/* RIGHT: message detail */}
+        {/* RIGHT: message detail (unchanged from previous layout). */}
         {showDetailColumn && selectedMessage && selectedSession && (
           <div className={styles.column}>
             <div className={styles.detailHeader}>
@@ -1065,6 +1313,214 @@ export function PromptsPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// -- Subcomponents ----------------------------------------------------------
+
+interface SessionReadingPaneProps {
+  session: PromptSession;
+  cwd: string;
+  templateCache: Record<string, PromptTemplate>;
+  selectedMessageKey: string;
+  onSelectMessage: (msg: PromptMessage) => void;
+  onLoadOlder: (cwd: string, sid: string) => void;
+  loadingOlder: boolean;
+  loadError?: string;
+}
+
+function SessionReadingPane({
+  session,
+  cwd,
+  templateCache,
+  selectedMessageKey,
+  onSelectMessage,
+  onLoadOlder,
+  loadingOlder,
+  loadError,
+}: SessionReadingPaneProps) {
+  const { t } = useTranslation();
+  const cwdLabel = formatCwdLabel(cwd);
+
+  return (
+    <div className={styles.sessionPane}>
+      <div className={styles.sessionPaneHeader}>
+        <div className={styles.sessionPaneTitle} title={cwdLabel.full}>
+          {cwdLabel.short}
+          <span className={styles.sessionPaneSeparator}>·</span>
+          <span className={styles.sessionId} title={session.session_id}>
+            {session.session_id}
+          </span>
+        </div>
+        <div className={styles.sessionPaneMeta}>
+          <span className={styles.badge}>{session.client || 'unknown'}</span>
+          {session.client_version && (
+            <span className={styles.badge}>{session.client_version}</span>
+          )}
+          {session.models.map((m) => (
+            <span key={m} className={styles.badge}>{m}</span>
+          ))}
+          <span className={styles.badge}>{session.message_count}m</span>
+        </div>
+      </div>
+      <div className={styles.messageList}>
+        {session.truncated && (
+          <>
+            {loadingOlder ? (
+              <div className={styles.cwdLoading}><LoadingSpinner /></div>
+            ) : loadError ? (
+              <div className={styles.cwdError}>
+                <span>{loadError}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onLoadOlder(cwd, session.session_id)}
+                >
+                  {t('prompts_page.retry', { defaultValue: 'Retry' })}
+                </Button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className={styles.loadMoreRow}
+                onClick={() => onLoadOlder(cwd, session.session_id)}
+              >
+                {t('prompts_page.load_more_messages', {
+                  defaultValue: 'Load {{n}} more messages',
+                  n: Math.max(0, session.message_count - session.messages.length),
+                })}
+              </button>
+            )}
+          </>
+        )}
+        {session.messages.map((msg) => {
+          const key = `${session.session_id}::${msg.ts}`;
+          const isSelected = key === selectedMessageKey;
+          const tplHash = msg.prompt_template;
+          const tpl = tplHash ? templateCache[tplHash] : undefined;
+          const tplLabel = tpl?.label;
+          const tplLen = tpl?.len;
+          const suffix = (msg.prompt ?? '').replace(/\s+/g, ' ').trim();
+          const isAssistant = msg.role === 'assistant';
+          const roleClass = isAssistant ? styles.assistantMsg : styles.userMsg;
+          const isSub = msg.is_subagent === true;
+          const subID = msg.subagent_id ?? '';
+          const rowClass = [
+            styles.messageRow,
+            roleClass,
+            isSub ? styles.subagentMsg : '',
+            isSelected ? styles.selectedMsg : '',
+          ]
+            .filter(Boolean)
+            .join(' ');
+          return (
+            <button
+              key={key}
+              type="button"
+              data-message-key={key}
+              className={rowClass}
+              onClick={() => onSelectMessage(msg)}
+            >
+              <div className={styles.msgHeader}>
+                <span className={styles.msgTime}>{timeOfDay(msg.ts)}</span>
+                {isSub && (
+                  <span
+                    className={styles.subagentChip}
+                    title={`Subagent ${subID || '(no id)'}`}
+                  >
+                    ↳ subagent{subID ? ` · ${subID.slice(0, 6)}` : ''}
+                  </span>
+                )}
+                {tplHash && (
+                  <span className={styles.tplChip} title={tpl?.text || `template ${tplHash}`}>
+                    {tplLabel ? `📋 ${tplLabel}` : `📋 ${tplHash}`}
+                    {tplLen ? ` · ${tplLen}c` : ''}
+                  </span>
+                )}
+              </div>
+              <div className={styles.msgBody}>
+                {suffix || (tplHash ? '' : '(empty)')}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+interface SearchResultsViewProps {
+  loading: boolean;
+  error: string;
+  results: PromptSearchResponse | null;
+  query: string;
+  onSelectHit: (hit: PromptSearchHit) => void;
+}
+
+function SearchResultsView({
+  loading,
+  error,
+  results,
+  query,
+  onSelectHit,
+}: SearchResultsViewProps) {
+  const { t } = useTranslation();
+  if (loading) return <div className={styles.loading}><LoadingSpinner /></div>;
+  if (error) return <div className={styles.errorBox}>{error}</div>;
+  if (!results) return null;
+  if (results.matches.length === 0) {
+    return (
+      <div className={styles.placeholder}>
+        {t('prompts_page.search_no_results', {
+          defaultValue: "No matches for '{{q}}'",
+          q: query,
+        })}
+      </div>
+    );
+  }
+  return (
+    <div className={styles.searchResults}>
+      {results.truncated && (
+        <div className={styles.searchTruncatedBanner}>
+          {t('prompts_page.search_truncated', {
+            defaultValue:
+              'Showing {{shown}} of {{total}} matches — refine the query for older results.',
+            shown: results.matches.length,
+            total: results.total_matches,
+          })}
+        </div>
+      )}
+      {results.matches.map((hit) => {
+        const label = formatCwdLabel(hit.cwd);
+        return (
+          <button
+            key={`${hit.session_id}::${hit.ts}`}
+            type="button"
+            className={styles.searchHitRow}
+            onClick={() => onSelectHit(hit)}
+            title={`${hit.cwd}\n${hit.session_id}\n${hit.ts}`}
+          >
+            <div className={styles.searchHitHead}>
+              <span className={styles.searchHitCwd}>{label.short}</span>
+              <span className={styles.searchHitTime}>
+                {new Date(hit.ts).toLocaleString()}
+              </span>
+              {hit.is_subagent && (
+                <span className={styles.subagentChip}>
+                  ↳ sub{hit.subagent_id ? ` · ${hit.subagent_id.slice(0, 6)}` : ''}
+                </span>
+              )}
+              {hit.role === 'assistant' && (
+                <span className={styles.badge}>assistant</span>
+              )}
+            </div>
+            <div className={styles.searchHitExcerpt}>
+              <HighlightedExcerpt text={hit.excerpt} query={query} />
+            </div>
+          </button>
+        );
+      })}
     </div>
   );
 }

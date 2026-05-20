@@ -116,6 +116,79 @@
   overflow: hidden;
 }
 
+// Keys-section filter input sits between the column header and the paste
+// row. Mirrors LogsPage's search-input pattern so the affordance reads the
+// same across pages — the trailing icon flips between magnifier (default)
+// and × (clear) depending on whether there's anything to clear.
+.keysFilterRow {
+  padding: $spacing-xs $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.keysFilterInput {
+  width: 100%;
+  font-size: 12px;
+}
+
+// The keys list itself when expanded. Capped at ~40% of the column so the
+// CWD/sessions tree below always has room — without a max-height the list
+// would consume the full column when the user has many keys.
+.keysListBody {
+  overflow-y: auto;
+  flex: 0 1 auto;
+  max-height: 40%;
+  border-bottom: 1px solid var(--border-color);
+}
+
+// Compact bar shown in place of the keys list once a key is picked. Holds
+// the selected key's hint + a Change button. Reclaims vertical space for
+// the tree below — the user only needs to see the full list when they're
+// actually switching keys.
+.keysCollapsedBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-sm;
+  padding: $spacing-sm $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--surface-secondary, transparent);
+}
+
+.keysCollapsedSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.keysCollapsedHint {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keysCollapsedMeta {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+// CWD/sessions tree container. Independent scroll so a long tree doesn't
+// push the keys section out of view above it.
+.treeBody {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
 .columnHeader {
   padding: $spacing-sm $spacing-md;
   border-bottom: 1px solid var(--border-color);
@@ -285,8 +358,6 @@
   flex-direction: column;
   // Indent sessions under their parent CWD and run a vertical guide line at
   // the level of the CWD chevron so the layer reads as a tree branch.
-  // 22px ≈ cwdHeader padding-left (16) + half chevron width (~6); tweak in
-  // pairs with .cwdHeader if either changes.
   position: relative;
   padding: $spacing-xs 0 $spacing-xs 28px;
 
@@ -301,24 +372,10 @@
   }
 }
 
-.sessionCard {
-  padding: 2px $spacing-md 2px 0;
-  position: relative;
-
-  // Short horizontal tick from the vertical guide line into each session
-  // toggle so the parent-child connection is explicit.
-  &::before {
-    content: '';
-    position: absolute;
-    left: -6px;
-    top: 14px;
-    width: 6px;
-    height: 1px;
-    background: var(--border-color);
-  }
-}
-
-.sessionToggle {
+// Single-select session row inside the CWD tree. The expand-toggle is gone
+// (the messages list lives in panel 2 now), so a session is just one row
+// the user clicks to load into the reading pane.
+.sessionRow {
   @include button-reset;
   width: 100%;
   display: flex;
@@ -329,8 +386,32 @@
   cursor: pointer;
   border-radius: 6px;
   transition: background 0.12s ease;
+  position: relative;
+
+  // Tick mark from the vertical guide line into each session row.
+  &::before {
+    content: '';
+    position: absolute;
+    left: -6px;
+    top: 14px;
+    width: 6px;
+    height: 1px;
+    background: var(--border-color);
+  }
 
   &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.06)); }
+}
+
+// Currently-loaded-in-reading-pane session: thin accent rail + tinted bg
+// so the user can see at a glance which row maps to the messages on the
+// right. Same accent treatment as `.userRow.selected` for consistency.
+.sessionRowActive {
+  background: var(--surface-selected, rgba(99, 102, 241, 0.12));
+  box-shadow: inset 3px 0 0 var(--accent, #6366f1);
+
+  &:hover {
+    background: var(--surface-selected, rgba(99, 102, 241, 0.16));
+  }
 }
 
 .sessionTitle {
@@ -343,14 +424,11 @@
   color: var(--text-primary);
 }
 
-.sessionHead {
-  display: flex;
-  flex-wrap: wrap;
+.sessionMeta {
+  display: inline-flex;
   align-items: center;
-  gap: $spacing-sm;
-  margin: $spacing-xs 0 $spacing-xs $spacing-sm;
-  padding-left: $spacing-md;
-  border-left: 1px dashed var(--border-color);
+  gap: $spacing-xs;
+  flex-shrink: 0;
 }
 
 .sessionId {
@@ -369,89 +447,92 @@
   color: var(--text-tertiary, var(--text-secondary));
 }
 
+// Messages list for the reading pane (panel 2). Variable-height rows so
+// short user prompts stay 1 line while long ones (assistant responses,
+// pasted code) clamp to 3 lines on the body block. No left guide line here
+// because the list isn't nested under a session toggle anymore — the panel
+// itself frames it.
 .messageList {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  // Align the expanded message list with .sessionHead so messages read as
-  // children of the parent session, not siblings of the toggle row.
-  margin-left: $spacing-sm;
-  padding-left: $spacing-md;
-  border-left: 1px dashed var(--border-color);
+  padding: $spacing-sm $spacing-md;
 }
 
 .messageRow {
   @include button-reset;
-  display: grid;
-  grid-template-columns: 60px 1fr;
-  gap: $spacing-sm;
-  padding: 4px $spacing-sm;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px $spacing-sm;
   font-size: 12px;
   cursor: pointer;
   border-radius: 6px;
-  align-items: center;
   text-align: left;
   transition: background 0.1s ease;
+  width: 100%;
 
   &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.08)); }
 
-  // Chat-style hierarchy: user prompts are the focus of the page so they
-  // keep full contrast and a thin accent rail. Assistant replies are
-  // supporting context — indented and dimmer — so the eye tracks
-  // conversation turn-taking by color alone (no role badge needed).
   &.userMsg {
     box-shadow: inset 2px 0 0 var(--accent, #6366f1);
-    .msgText { color: var(--text-primary); font-weight: 500; }
+    .msgBody { color: var(--text-primary); font-weight: 500; }
   }
   &.assistantMsg {
     margin-left: $spacing-md;
     padding-left: $spacing-sm;
     background: var(--surface-muted, rgba(127, 127, 127, 0.04));
-    .msgText { color: var(--text-secondary); }
+    .msgBody { color: var(--text-secondary); }
     .msgTime { opacity: 0.6; }
   }
 
-  // Subagent indent: messages produced inside a Task-tool / child-session
-  // dispatch are nested one step in from the parent's rail so the reader
-  // can see the conversation hand-off at a glance. The border-left
-  // continues the chat-style hierarchy from .userMsg / .assistantMsg
-  // without competing for the role-color signal. Stacks on top of the
-  // role classes — both a user-role subagent row and an assistant-role
-  // subagent row keep their respective accents under the indent.
   &.subagentMsg {
     margin-left: $spacing-lg;
     border-left: 2px dashed var(--border-color);
     padding-left: $spacing-sm;
   }
 
-  // selectedMsg is declared LAST so source-order specificity (same as
-  // role classes, but later wins) lets it override the role-class
-  // box-shadow rail and assistant muted background. Without this order
-  // a selected user row keeps the 2px role rail (loses the 3px selection
-  // rail) and a selected assistant row keeps its muted bg (no selection
-  // bg change). Reorder, don't bump specificity — keeps the cascade flat.
   &.selectedMsg {
     background: var(--surface-selected, rgba(99, 102, 241, 0.14));
     box-shadow: inset 3px 0 0 var(--accent, #6366f1);
   }
 }
 
+// Chip row above the body. Stays single-line — only the body wraps.
+.msgHeader {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+}
+
+// Body block. line-clamp 3 keeps long prompts (assistant responses, pasted
+// stack traces) from blowing up row height while still showing more context
+// than the previous single-line ellipsis. The unprefixed `line-clamp` is the
+// spec form; the -webkit-line-clamp + display:-webkit-box pair is the still-
+// required workhorse path that ships everywhere.
+.msgBody {
+  color: var(--text-primary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
 .msgTime {
   font-family: ui-monospace, SFMono-Regular, monospace;
   font-size: 11px;
   color: var(--text-secondary);
+  flex-shrink: 0;
 }
 
 .msgModel {
   font-size: 11px;
   color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.msgText {
-  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -700,4 +781,175 @@
   align-items: center;
   gap: $spacing-sm;
   margin-bottom: $spacing-xs;
+}
+
+// Panel-2 search row. Sits under the column header so the search affordance
+// is always visible regardless of what the reading pane is showing. Mirrors
+// LogsPage.module.scss .searchRow layout / `.searchInput` styling so the
+// two pages have the same muscle memory.
+.searchRow {
+  padding: $spacing-xs $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.searchInput {
+  width: 100%;
+  font-size: 12px;
+}
+
+// Trailing X (clear) button inside the search input. Stays small so it
+// doesn't compete with the input text; appears only when there's input.
+.searchClear {
+  @include button-reset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--surface-hover, rgba(127, 127, 127, 0.12));
+    color: var(--text-primary);
+  }
+}
+
+// Panel-2 scrollable body. Holds either the reading pane (messages of
+// selected session) or the search results list. The ref-bound scroll
+// container in the React code reads scrollTop / scrollHeight here for the
+// scroll-memory + pagination anchor logic — don't move overflow:auto down
+// into a child without updating that ref.
+.readingPane {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+// Session reading pane wrapper. The header is sticky-top within the
+// scrolling container (.readingPane has overflow-y:auto), so the session
+// title / chips stay visible while the user scrolls the message list. The
+// search-results view replaces this whole subtree when search is active,
+// so the sticky-header path is session-only — search results show their
+// own (non-sticky) truncation banner inline.
+.sessionPane {
+  display: flex;
+  flex-direction: column;
+}
+
+.sessionPaneHeader {
+  padding: $spacing-sm $spacing-md;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--surface-secondary, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-xs;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.sessionPaneTitle {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionPaneSeparator {
+  color: var(--text-secondary);
+  margin: 0 2px;
+}
+
+.sessionPaneMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-xs;
+  align-items: center;
+}
+
+// Search results list. Replaces the message list inside .readingPane while
+// the search query is active.
+.searchResults {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: $spacing-sm $spacing-md;
+}
+
+.searchTruncatedBanner {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-secondary);
+  padding: $spacing-xs $spacing-sm;
+  background: var(--surface-secondary, rgba(127, 127, 127, 0.06));
+  border-radius: 4px;
+  margin-bottom: $spacing-xs;
+}
+
+.searchHitRow {
+  @include button-reset;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px $spacing-sm;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+  border-bottom: 1px solid var(--border-color);
+
+  &:last-child { border-bottom: none; }
+  &:hover { background: var(--surface-hover, rgba(127, 127, 127, 0.08)); }
+}
+
+.searchHitHead {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  flex-wrap: wrap;
+  font-size: 11px;
+}
+
+.searchHitCwd {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.searchHitTime {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  color: var(--text-secondary);
+}
+
+.searchHitExcerpt {
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-word;
+  // 2-line clamp on excerpts — the server already cuts ±60 chars around
+  // the match so an excerpt is usually short. Two lines accommodates
+  // wrapping on narrow columns without ballooning row height.
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+// Match highlight inside an excerpt. The accent-tinted background is enough
+// to draw the eye without overpowering surrounding text — saturating to
+// the full accent would compete with the selected-row treatment elsewhere.
+.searchHighlight {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.22));
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
 }

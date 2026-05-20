@@ -790,56 +790,147 @@ func TestBuildDetail_MergesOpencodeSubagentIntoParentSession(t *testing.T) {
 	}
 }
 
-// Orphan subagent (parent rolled out of retention or never present) must
-// not crash the reader. Claude Code orphan looks like a normal entry under
-// "(unknown)"; opencode orphan keeps its own session id and renders as a
-// separate card.
-func TestBuildDetail_OrphanSubagentFallsBackToUnknown(t *testing.T) {
+// Orphan subagent (parent rolled out of retention or never present) is
+// dropped at render time. Standalone dispatcher framing ("Spawn a subagent
+// to…", "CRITICAL: Respond with TEXT ONLY…") carries no human context, so
+// surfacing it as a separate session card is pure noise. Disk content is
+// untouched — a later scan with the parent back in the window will render
+// the subagent normally.
+func TestBuildDetail_OrphanSubagentDropped(t *testing.T) {
 	dir := t.TempDir()
 	hash := ratelimit.HashKey("sk-alice")
 	t0 := time.Date(2026, 5, 20, 10, 30, 0, 0, time.UTC)
 
-	// Claude Code orphan: subagent shares "sid-missing-parent" but no
-	// parent turn for that session exists.
-	// Opencode orphan: parent_session_id points to "ses_NOPE" which is
-	// not in the scan.
+	// One real parent turn under /Users/u/proj so the response has a real
+	// group to assert against. Then two orphans that must NOT appear.
 	writeJSONL(t, dir, "2026-05-20",
-		Entry{KeyHash: hash, Timestamp: t0, SessionID: "sid-missing-parent", AgentID: "agentX", Client: ClientClaudeCode, Role: "user", Prompt: "orphan cc"},
-		Entry{KeyHash: hash, Timestamp: t0.Add(time.Second), SessionID: "ses_BBB", ParentSessionID: "ses_NOPE", Client: ClientOpencode, Role: "user", Prompt: "orphan oc"},
+		Entry{KeyHash: hash, Timestamp: t0, CWD: "/Users/u/proj", SessionID: "sid-real", Client: ClientClaudeCode, Role: "user", Prompt: "real user message"},
+		// Claude Code orphan: shares "sid-missing-parent" with nothing.
+		Entry{KeyHash: hash, Timestamp: t0.Add(time.Second), SessionID: "sid-missing-parent", AgentID: "agentX", Client: ClientClaudeCode, Role: "user", Prompt: "orphan cc"},
+		// Opencode orphan: points at "ses_NOPE" which never existed.
+		Entry{KeyHash: hash, Timestamp: t0.Add(2 * time.Second), SessionID: "ses_BBB", ParentSessionID: "ses_NOPE", Client: ClientOpencode, Role: "user", Prompt: "orphan oc"},
 	)
 
 	d, err := BuildDetail(dir, hash, "sk-a...lice", true, DetailOpts{MessageLimit: 200, SessionLimit: 200, InitialCWDs: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Both orphans live under (unknown) since neither has its own CWD.
-	if len(d.Groups) != 1 || d.Groups[0].CWD != "(unknown)" {
-		t.Fatalf("expected 1 (unknown) group, got %+v", d.Groups)
+	// Only the real parent's group must surface — no "(unknown)" card.
+	if len(d.Groups) != 1 || d.Groups[0].CWD != "/Users/u/proj" {
+		t.Fatalf("expected 1 /Users/u/proj group, got %+v", d.Groups)
 	}
-	// Two separate session cards (Claude Code shares parent sid; opencode
-	// keeps its own sid), neither flagged as subagent because no parent
-	// resolved.
-	if len(d.Groups[0].Sessions) != 2 {
-		t.Fatalf("expected 2 separate orphan sessions, got %d", len(d.Groups[0].Sessions))
+	if len(d.Groups[0].Sessions) != 1 || d.Groups[0].Sessions[0].SessionID != "sid-real" {
+		t.Fatalf("expected only sid-real session, got %+v", d.Groups[0].Sessions)
 	}
-	// Pin the bucket session id to the on-disk SessionID for each orphan:
-	// a future refactor that collapses bucketSID to "(no-session)" or to
-	// the parent_session_id would silently lose this guarantee. We need
-	// both orphans to remain individually addressable.
-	gotSIDs := map[string]bool{}
-	for _, s := range d.Groups[0].Sessions {
-		gotSIDs[s.SessionID] = true
-		for _, m := range s.Messages {
-			if m.IsSubagent {
-				t.Errorf("orphan message wrongly flagged as subagent: %+v", m)
+	// Totals reflect the dropped entries (1 message, 1 session, 1 CWD), not
+	// the raw 3 entries written to disk.
+	if d.TotalMessages != 1 {
+		t.Errorf("TotalMessages=%d want 1 (orphans excluded)", d.TotalMessages)
+	}
+	if d.TotalSessions != 1 {
+		t.Errorf("TotalSessions=%d want 1 (orphans excluded)", d.TotalSessions)
+	}
+	if d.TotalCWDs != 1 {
+		t.Errorf("TotalCWDs=%d want 1 ((unknown) bucket suppressed)", d.TotalCWDs)
+	}
+}
+
+// Claude Code wraps slash commands in a chained <command-name>/<command-message>/
+// <command-args> preamble. extract.go's per-tag isWrapperOnly cannot match
+// the multi-tag chain, so the wrapper lands on disk as the first ~130 bytes
+// of the prompt and visually drowns the actual user question. Reader strips
+// it at render time so historical entries also display clean.
+func TestBuildDetail_StripsCommandWrapperPrefix(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	t0 := time.Date(2026, 5, 20, 11, 0, 0, 0, time.UTC)
+
+	// Three flavors observed in real logs:
+	//   1. /clear + user question — preamble + double newline + text
+	//   2. /model with args — same shape, args tag non-empty
+	//   3. plain text containing the literal "<command-name>" later in
+	//      the body — must NOT be stripped (not at the start)
+	writeJSONL(t, dir, "2026-05-20",
+		Entry{
+			KeyHash: hash, Timestamp: t0, CWD: "/p", SessionID: "s1",
+			Client: ClientClaudeCode, Role: "user",
+			Prompt: "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>\n\n\nreal question here",
+		},
+		Entry{
+			KeyHash: hash, Timestamp: t0.Add(time.Second), CWD: "/p", SessionID: "s1",
+			Client: ClientClaudeCode, Role: "user",
+			Prompt: "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-opus-4-7[1M]</command-args>\n\nwhat does H2 defer mean?",
+		},
+		Entry{
+			KeyHash: hash, Timestamp: t0.Add(2 * time.Second), CWD: "/p", SessionID: "s1",
+			Client: ClientClaudeCode, Role: "user",
+			Prompt: "look at this XML: <command-name>foo</command-name> — what is it?",
+		},
+	)
+
+	d, err := BuildDetail(dir, hash, "sk-a...lice", true, DetailOpts{MessageLimit: 200, SessionLimit: 200, InitialCWDs: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 1 || len(d.Groups[0].Sessions) != 1 {
+		t.Fatalf("expected 1 group / 1 session, got %+v", d.Groups)
+	}
+	msgs := d.Groups[0].Sessions[0].Messages
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	if msgs[0].Prompt != "real question here" {
+		t.Errorf("msg[0].Prompt=%q want %q", msgs[0].Prompt, "real question here")
+	}
+	if msgs[1].Prompt != "what does H2 defer mean?" {
+		t.Errorf("msg[1].Prompt=%q want %q", msgs[1].Prompt, "what does H2 defer mean?")
+	}
+	if msgs[2].Prompt != "look at this XML: <command-name>foo</command-name> — what is it?" {
+		t.Errorf("msg[2].Prompt=%q (must not strip mid-prompt wrapper)", msgs[2].Prompt)
+	}
+}
+
+// Unit coverage for stripCommandWrapperPrefix edge cases that the
+// integration test above doesn't isolate cleanly. Pin behavior so future
+// edits to the helper don't silently degrade preamble stripping or start
+// mangling legitimate content.
+func TestStripCommandWrapperPrefix(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain text", "hello world", "hello world"},
+		{"single command-name + body",
+			"<command-name>/clear</command-name>\n\nhi",
+			"hi"},
+		{"chained name+message+args + body",
+			"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>\n\nreal text",
+			"real text"},
+		{"chained, empty body — preamble only",
+			"<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>",
+			""},
+		{"leading whitespace before preamble",
+			"   \n<command-name>/clear</command-name>\nbody",
+			"body"},
+		{"unknown command-X tag — bail at first non-wrapper tag",
+			"<command-foo>bar</command-foo>real",
+			"<command-foo>bar</command-foo>real"},
+		{"wrapper mid-prompt is preserved",
+			"hello <command-name>/clear</command-name>",
+			"hello <command-name>/clear</command-name>"},
+		{"malformed (open tag, no close) — return original",
+			"<command-name>/clear\nhi",
+			"<command-name>/clear\nhi"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripCommandWrapperPrefix(tc.in)
+			if got != tc.want {
+				t.Errorf("stripCommandWrapperPrefix(%q) = %q, want %q", tc.in, got, tc.want)
 			}
-		}
-	}
-	if !gotSIDs["sid-missing-parent"] {
-		t.Errorf("Claude Code orphan session id not preserved (got %v)", gotSIDs)
-	}
-	if !gotSIDs["ses_BBB"] {
-		t.Errorf("opencode orphan session id not preserved (got %v)", gotSIDs)
+		})
 	}
 }
 
@@ -889,5 +980,234 @@ func TestBuildDetail_LinksMultiTurnSubagentBatch(t *testing.T) {
 	}
 	if subFlagged != 28 {
 		t.Errorf("IsSubagent count=%d want 28", subFlagged)
+	}
+}
+
+func TestSearchMessages_EmptyDir(t *testing.T) {
+	res, err := SearchMessages(t.TempDir(), "abc123", "hello", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || len(res.Matches) != 0 || res.TotalMatches != 0 || res.Truncated {
+		t.Errorf("expected empty result, got %+v", res)
+	}
+}
+
+func TestSearchMessages_EmptyQuery(t *testing.T) {
+	// Defensive: caller should validate but the helper must not match
+	// every message when q is blank.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	writeJSONL(t, dir, "2026-05-15",
+		Entry{KeyHash: hash, Timestamp: time.Now(), SessionID: "s1", CWD: "/proj", Prompt: "hello world"},
+	)
+	res, err := SearchMessages(dir, hash, "   ", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Matches) != 0 {
+		t.Errorf("blank query should match nothing, got %d hits", len(res.Matches))
+	}
+}
+
+func TestSearchMessages_BasicMatch(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	now := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
+	writeJSONL(t, dir, "2026-05-15",
+		Entry{KeyHash: hash, Timestamp: now, SessionID: "s1", CWD: "/proj", Prompt: "fix the auth bug"},
+		Entry{KeyHash: hash, Timestamp: now.Add(time.Hour), SessionID: "s1", CWD: "/proj", Prompt: "update README only"},
+		Entry{KeyHash: hash, Timestamp: now.Add(2 * time.Hour), SessionID: "s2", CWD: "/proj", Prompt: "AUTH MIDDLEWARE refactor"},
+	)
+	res, err := SearchMessages(dir, hash, "auth", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Matches) != 2 || res.TotalMatches != 2 || res.Truncated {
+		t.Fatalf("expected 2 matches, got %+v", res)
+	}
+	// Desc by ts: AUTH MIDDLEWARE first.
+	if !strings.Contains(strings.ToLower(res.Matches[0].Excerpt), "auth middleware") {
+		t.Errorf("matches[0] excerpt=%q (want newest first)", res.Matches[0].Excerpt)
+	}
+	if res.Matches[0].SessionID != "s2" {
+		t.Errorf("matches[0] session=%q want s2", res.Matches[0].SessionID)
+	}
+}
+
+func TestSearchMessages_OtherKeyIgnored(t *testing.T) {
+	dir := t.TempDir()
+	alice := ratelimit.HashKey("sk-alice")
+	bob := ratelimit.HashKey("sk-bob")
+	now := time.Now()
+	writeJSONL(t, dir, "2026-05-15",
+		Entry{KeyHash: alice, Timestamp: now, SessionID: "a", CWD: "/proj", Prompt: "auth"},
+		Entry{KeyHash: bob, Timestamp: now, SessionID: "b", CWD: "/proj", Prompt: "auth"},
+	)
+	res, _ := SearchMessages(dir, alice, "auth", 50)
+	if len(res.Matches) != 1 || res.Matches[0].SessionID != "a" {
+		t.Errorf("cross-key leak: %+v", res.Matches)
+	}
+}
+
+func TestSearchMessages_ExcerptClipping(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	long := strings.Repeat("x ", 100) + "PATTERN" + strings.Repeat(" y", 100)
+	writeJSONL(t, dir, "2026-05-15",
+		Entry{KeyHash: hash, Timestamp: time.Now(), SessionID: "s", CWD: "/p", Prompt: long},
+	)
+	res, _ := SearchMessages(dir, hash, "pattern", 10)
+	if len(res.Matches) != 1 {
+		t.Fatalf("got %d matches", len(res.Matches))
+	}
+	ex := res.Matches[0].Excerpt
+	if !strings.Contains(strings.ToLower(ex), "pattern") {
+		t.Errorf("excerpt missing match: %q", ex)
+	}
+	// Should be clipped on both sides.
+	if !strings.HasPrefix(ex, "…") || !strings.HasSuffix(ex, "…") {
+		t.Errorf("excerpt should be clipped both sides, got %q", ex)
+	}
+	// And much shorter than the raw prompt (60×2 window + match + ellipses ≈ 130 chars).
+	if len(ex) > 200 {
+		t.Errorf("excerpt too long: %d chars (%q)", len(ex), ex)
+	}
+}
+
+func TestSearchMessages_WhitespaceNormalized(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	writeJSONL(t, dir, "2026-05-15",
+		Entry{KeyHash: hash, Timestamp: time.Now(), SessionID: "s", CWD: "/p",
+			Prompt: "line one\nline\twith\rtabs\n\n\nfind here\n   trailing"},
+	)
+	res, _ := SearchMessages(dir, hash, "find", 10)
+	if len(res.Matches) != 1 {
+		t.Fatalf("got %d hits", len(res.Matches))
+	}
+	ex := res.Matches[0].Excerpt
+	if strings.ContainsAny(ex, "\n\r\t") {
+		t.Errorf("excerpt still has whitespace control chars: %q", ex)
+	}
+	// No double spaces.
+	if strings.Contains(ex, "  ") {
+		t.Errorf("excerpt has collapsed whitespace runs: %q", ex)
+	}
+}
+
+func TestSearchMessages_LimitAndTruncated(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	base := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
+	entries := make([]Entry, 0, 25)
+	for i := 0; i < 25; i++ {
+		entries = append(entries, Entry{
+			KeyHash:   hash,
+			Timestamp: base.Add(time.Duration(i) * time.Minute),
+			SessionID: "s" + strconv.Itoa(i),
+			CWD:       "/p",
+			Prompt:    "needle " + strconv.Itoa(i),
+		})
+	}
+	writeJSONL(t, dir, "2026-05-15", entries...)
+
+	res, _ := SearchMessages(dir, hash, "needle", 10)
+	if len(res.Matches) != 10 || res.TotalMatches != 25 || !res.Truncated {
+		t.Errorf("limit cap wrong: matches=%d total=%d trunc=%v", len(res.Matches), res.TotalMatches, res.Truncated)
+	}
+	// Desc by ts: newest is entry 24.
+	if !strings.Contains(res.Matches[0].Excerpt, "needle 24") {
+		t.Errorf("matches[0]=%q (want newest 'needle 24')", res.Matches[0].Excerpt)
+	}
+}
+
+func TestSearchMessages_LimitDefaultsAndCap(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	writeJSONL(t, dir, "2026-05-15",
+		Entry{KeyHash: hash, Timestamp: time.Now(), SessionID: "s", CWD: "/p", Prompt: "hello"},
+	)
+	// limit ≤ 0 → default 200 (well above 1 match here, no truncation).
+	if res, _ := SearchMessages(dir, hash, "hello", 0); res.Truncated {
+		t.Errorf("default limit should not truncate single match: %+v", res)
+	}
+	if res, _ := SearchMessages(dir, hash, "hello", -5); res.Truncated {
+		t.Errorf("negative limit should not truncate single match: %+v", res)
+	}
+	// limit > 500 should still scan but not blow past internal cap. The
+	// public contract is "we cap at 500", verified by the API handler test;
+	// here we just check it doesn't crash on a huge value.
+	if _, err := SearchMessages(dir, hash, "hello", 100_000); err != nil {
+		t.Errorf("large limit errored: %v", err)
+	}
+}
+
+func TestSearchMessages_SubagentBucketing(t *testing.T) {
+	// Claude Code subagent: shares parent SessionID, has AgentID, no CWD.
+	// A search hit on the subagent's prompt should report the PARENT's
+	// (cwd, session_id) so the UI deep-links into the parent's reading pane.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	now := time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC)
+	writeJSONL(t, dir, "2026-05-15",
+		// Parent turn (defines the (cwd, sid) bucket).
+		Entry{KeyHash: hash, Timestamp: now, SessionID: "main", CWD: "/work", Prompt: "kick off"},
+		// Subagent turn (no own CWD; AgentID present).
+		Entry{KeyHash: hash, Timestamp: now.Add(time.Minute), SessionID: "main", AgentID: "agent-deadbeef", Prompt: "find unicorn references"},
+	)
+	res, _ := SearchMessages(dir, hash, "unicorn", 50)
+	if len(res.Matches) != 1 {
+		t.Fatalf("got %d hits", len(res.Matches))
+	}
+	hit := res.Matches[0]
+	if hit.CWD != "/work" {
+		t.Errorf("CWD bucketed to %q want parent /work", hit.CWD)
+	}
+	if hit.SessionID != "main" {
+		t.Errorf("SessionID=%q want parent main", hit.SessionID)
+	}
+	if !hit.IsSubagent || hit.SubagentID == "" {
+		t.Errorf("subagent flags missing: %+v", hit)
+	}
+}
+
+func TestSearchMessages_OrphanSubagentDropped(t *testing.T) {
+	// Subagent with no findable parent: BuildDetail drops it to avoid
+	// surfacing dispatcher framing with no human context. Search must
+	// behave the same so results are consistent with the tree.
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	writeJSONL(t, dir, "2026-05-15",
+		Entry{KeyHash: hash, Timestamp: time.Now(), SessionID: "lonely", AgentID: "agent-x",
+			Prompt: "needle dispatch context only"},
+	)
+	res, _ := SearchMessages(dir, hash, "needle", 50)
+	if len(res.Matches) != 0 {
+		t.Errorf("orphan subagent should be dropped, got %d hits", len(res.Matches))
+	}
+}
+
+func TestSearchMessages_UnicodeAndCaseFolding(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	writeJSONL(t, dir, "2026-05-15",
+		// Vietnamese diacritics: lowercase query should still match.
+		Entry{KeyHash: hash, Timestamp: time.Now(), SessionID: "s1", CWD: "/p",
+			Prompt: "Cập nhật lại giao diện prompts"},
+		// Mixed-case English.
+		Entry{KeyHash: hash, Timestamp: time.Now().Add(time.Minute), SessionID: "s2", CWD: "/p",
+			Prompt: "REFACTOR the Reader"},
+	)
+	// "GIAO" (uppercased ASCII portion of Vietnamese) should match "giao".
+	if res, _ := SearchMessages(dir, hash, "GIAO", 50); len(res.Matches) != 1 {
+		t.Errorf("uppercase ASCII query should case-fold: %+v", res)
+	}
+	// Vietnamese diacritic query.
+	if res, _ := SearchMessages(dir, hash, "giao diện", 50); len(res.Matches) != 1 {
+		t.Errorf("vietnamese query should match: %+v", res)
+	}
+	if res, _ := SearchMessages(dir, hash, "refactor", 50); len(res.Matches) != 1 {
+		t.Errorf("english case-fold: %+v", res)
 	}
 }

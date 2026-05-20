@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	log "github.com/sirupsen/logrus"
 
@@ -289,6 +290,39 @@ type DetailOpts struct {
 	HeadersOnly bool
 }
 
+// SearchHit is one row of /v0/management/prompts/users/:key/search. CWD and
+// SessionID are the RENDER-TIME bucket (subagent → parent, same as
+// BuildDetail), so a click can deep-link into the parent's reading pane
+// without the UI repeating that resolution. Orphan subagents are dropped
+// (would surface dispatcher framing with no human context — pure noise),
+// matching BuildDetail's behavior so search results stay consistent with
+// what the tree shows.
+type SearchHit struct {
+	CWD        string    `json:"cwd"`
+	SessionID  string    `json:"session_id"`
+	Timestamp  time.Time `json:"ts"`
+	Role       string    `json:"role,omitempty"`
+	// Excerpt is a clipped window of Message.Prompt around the first match,
+	// whitespace normalized, with "…" prefixes/suffixes when clipped. The
+	// caller re-locates the match with a case-insensitive indexOf on this
+	// string to render highlights; we don't return byte offsets because JS
+	// strings index by UTF-16 code units while Go bytes are UTF-8 — the
+	// translation is error-prone and the client-side re-scan is cheap.
+	Excerpt    string `json:"excerpt"`
+	IsSubagent bool   `json:"is_subagent,omitempty"`
+	SubagentID string `json:"subagent_id,omitempty"`
+}
+
+// SearchResult is the response shape for the search endpoint. TotalMatches
+// counts every match for this query (the scan completes regardless of
+// limit), while Matches is the limit-capped, ts-desc-sorted slice. Truncated
+// reports whether the slice was clipped.
+type SearchResult struct {
+	Matches      []SearchHit `json:"matches"`
+	TotalMatches int         `json:"total_matches"`
+	Truncated    bool        `json:"truncated"`
+}
+
 type Session struct {
 	SessionID     string    `json:"session_id"`
 	Client        string    `json:"client"`
@@ -492,12 +526,22 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 			// opencode subagent: parent_session_id points to the
 			// spawning session, which has a different SessionID. Merge
 			// the subagent's messages into the parent's session card
-			// when the parent is found; otherwise the orphan keeps its
-			// own session id and renders as a separate card.
+			// when the parent is found; otherwise it's an orphan and
+			// gets dropped below.
 			if p, ok := parentBySession[e.ParentSessionID]; ok {
 				bucketCWD, bucketSID = p.cwd, p.sid
 				isSub, subID = true, shortSessionID(e.SessionID)
 			}
+		}
+
+		// Orphan subagent drop: entry carries subagent markers but the
+		// parent isn't in retention. Rendering it as a standalone card
+		// surfaces dispatcher framing ("Spawn a subagent to…", "CRITICAL:
+		// Respond with TEXT ONLY…") with no human context — pure noise.
+		// The on-disk entry is untouched so a later scan can re-link if
+		// the parent comes back into the window.
+		if (e.AgentID != "" || e.ParentSessionID != "") && !isSub {
+			continue
 		}
 
 		cwd := bucketCWD
@@ -567,7 +611,7 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 			Provider:       e.Provider,
 			Status:         e.Status,
 			Role:           role,
-			Prompt:         e.Prompt,
+			Prompt:         stripCommandWrapperPrefix(e.Prompt),
 			PromptTemplate: e.PromptTemplate,
 			IsSubagent:     isSub,
 			SubagentID:     subID,
@@ -693,6 +737,203 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 	}, nil
 }
 
+// SearchMessages does a case-insensitive substring scan over Message.Prompt
+// for entries belonging to keyHash and returns ts-desc, limit-capped hits.
+// Caller validates query is non-empty after trim; passing "" yields an empty
+// result (no match) rather than every message.
+//
+// Subagent linking mirrors BuildDetail's 2-pass model so a click on a search
+// hit can route into the parent's reading pane the same way the tree does.
+// Orphan subagents (parent rolled out of retention) are dropped — they'd
+// otherwise show dispatcher framing without human context, matching the
+// tree's behavior for consistency.
+//
+// Template-prefix search is OUT OF SCOPE for PR1: a templated entry's full
+// text is `template.body + prompt_suffix`, and the body lives in a separate
+// store. This function searches the suffix only. Documented limitation: a
+// query that would only match inside the template prefix won't hit. Wire
+// the TemplateStore in here later if that gap matters.
+func SearchMessages(dir, keyHash, query string, limit int) (*SearchResult, error) {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return &SearchResult{Matches: []SearchHit{}}, nil
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	// Pre-lowercase the query once (rune-aware) so the per-entry compare
+	// path only allocates the haystack lowercase.
+	lowQuery := []rune(strings.ToLower(q))
+
+	// Pass 1: materialize this key's entries + parent map. Identical
+	// pattern to BuildDetail — the duplication is deliberate: extracting a
+	// shared helper risks regressing BuildDetail's well-tested behavior for
+	// a per-PR1 feature. Consolidate later if a third caller needs it.
+	type parentRef struct {
+		cwd string
+		sid string
+	}
+	parentBySession := map[string]parentRef{}
+	entries := make([]Entry, 0, 256)
+	if err := scanAll(dir, func(e Entry) bool {
+		if e.KeyHash != keyHash {
+			return true
+		}
+		// Blocks are dropped to keep memory bounded — search hits don't
+		// surface block content (PR1 scope is prompt text only).
+		e.Blocks = nil
+		entries = append(entries, e)
+		if e.AgentID == "" && e.ParentSessionID == "" && e.CWD != "" && e.SessionID != "" {
+			parentBySession[e.SessionID] = parentRef{cwd: e.CWD, sid: e.SessionID}
+		}
+		return true
+	}); err != nil {
+		return nil, err
+	}
+
+	hits := make([]SearchHit, 0, 64)
+	for _, e := range entries {
+		if e.Prompt == "" {
+			continue
+		}
+		// Bucket decision: same switch as BuildDetail.
+		bucketCWD, bucketSID := e.CWD, e.SessionID
+		isSub, subID := false, ""
+		switch {
+		case e.AgentID != "" && e.SessionID != "":
+			if p, ok := parentBySession[e.SessionID]; ok {
+				bucketCWD = p.cwd
+				isSub, subID = true, shortAgentID(e.AgentID)
+			}
+		case e.ParentSessionID != "":
+			if p, ok := parentBySession[e.ParentSessionID]; ok {
+				bucketCWD, bucketSID = p.cwd, p.sid
+				isSub, subID = true, shortSessionID(e.SessionID)
+			}
+		}
+		// Orphan subagent drop — same reasoning as BuildDetail.
+		if (e.AgentID != "" || e.ParentSessionID != "") && !isSub {
+			continue
+		}
+
+		excerpt := buildExcerpt(e.Prompt, lowQuery, 60)
+		if excerpt == "" {
+			continue
+		}
+
+		cwd := bucketCWD
+		if cwd == "" {
+			cwd = "(unknown)"
+		}
+		sid := bucketSID
+		if sid == "" {
+			sid = "(no-session)"
+		}
+
+		hits = append(hits, SearchHit{
+			CWD:        cwd,
+			SessionID:  sid,
+			Timestamp:  e.Timestamp,
+			Role:       e.Role,
+			Excerpt:    excerpt,
+			IsSubagent: isSub,
+			SubagentID: subID,
+		})
+	}
+
+	total := len(hits)
+	sort.Slice(hits, func(i, j int) bool {
+		return hits[i].Timestamp.After(hits[j].Timestamp)
+	})
+	truncated := total > limit
+	if truncated {
+		hits = hits[:limit]
+	}
+	return &SearchResult{
+		Matches:      hits,
+		TotalMatches: total,
+		Truncated:    truncated,
+	}, nil
+}
+
+// buildExcerpt returns a ±window-rune slice of prompt around the first
+// case-insensitive match of lowQuery (already lowercased and rune-sliced by
+// the caller), with whitespace collapsed to single spaces and "…" markers on
+// any clipped end. Empty result means no match.
+//
+// Rune-aware throughout: byte-level strings.Index would break on multi-byte
+// runes (Vietnamese diacritics, emoji), and strings.ToLower can change byte
+// counts (e.g. some Turkish forms), so byte offsets returned by Index don't
+// round-trip back to the original string safely. unicode.ToLower is rune-to-
+// rune so the two slices we build below stay positionally aligned.
+func buildExcerpt(prompt string, lowQuery []rune, window int) string {
+	if len(lowQuery) == 0 {
+		return ""
+	}
+	runes := []rune(prompt)
+	if len(runes) < len(lowQuery) {
+		return ""
+	}
+	lowRunes := make([]rune, len(runes))
+	for i, r := range runes {
+		lowRunes[i] = unicode.ToLower(r)
+	}
+	idx := -1
+outer:
+	for i := 0; i <= len(lowRunes)-len(lowQuery); i++ {
+		for j := 0; j < len(lowQuery); j++ {
+			if lowRunes[i+j] != lowQuery[j] {
+				continue outer
+			}
+		}
+		idx = i
+		break
+	}
+	if idx < 0 {
+		return ""
+	}
+
+	start := idx - window
+	end := idx + len(lowQuery) + window
+	if start < 0 {
+		start = 0
+	}
+	if end > len(runes) {
+		end = len(runes)
+	}
+
+	var sb strings.Builder
+	sb.Grow(end - start + 4)
+	if start > 0 {
+		sb.WriteRune('…')
+	}
+	lastWasSpace := false
+	for _, r := range runes[start:end] {
+		// Normalize whitespace to a single space so excerpts render on one
+		// line in the UI without the page wrapping logic having to fight a
+		// stray newline or tab from inside the prompt.
+		if r == '\n' || r == '\r' || r == '\t' {
+			r = ' '
+		}
+		if r == ' ' {
+			if !lastWasSpace {
+				sb.WriteRune(' ')
+				lastWasSpace = true
+			}
+			continue
+		}
+		sb.WriteRune(r)
+		lastWasSpace = false
+	}
+	if end < len(runes) {
+		sb.WriteRune('…')
+	}
+	return strings.TrimSpace(sb.String())
+}
+
 // MakeKeyHint returns "abcd...wxyz" — the head and tail of an API key — so
 // the UI can display a recognizable token without leaking the full secret.
 // Short keys (≤ 8 chars) are returned verbatim because there's nothing to mask.
@@ -720,6 +961,64 @@ func IsHexKeyHash(s string) bool {
 		}
 	}
 	return true
+}
+
+// stripCommandWrapperPrefix removes Claude Code's chained slash-command
+// preamble from the start of a prompt. When a user types e.g.
+// `/clear` followed by a real question, the CLI ships the request body
+// with a leading text block containing:
+//
+//	<command-name>/clear</command-name>
+//	<command-message>clear</command-message>
+//	<command-args></command-args>
+//
+// extract.go's isWrapperOnly drops blocks enclosed by a SINGLE wrapper
+// tag, but the chained form here starts with <command-name> and ends
+// with </command-args> — no single tag matches, so the wrapper lands
+// on disk verbatim and clutters the first-message preview in the UI.
+//
+// This helper runs read-time so historical entries also display clean;
+// disk content is untouched. Conservative: bails at the first
+// non-wrapper, non-whitespace character, so user content that legitimately
+// mentions one of these tags later in the prompt is preserved. Returns
+// the input unchanged if nothing matches.
+func stripCommandWrapperPrefix(s string) string {
+	rest := strings.TrimLeft(s, " \t\r\n")
+	if !strings.HasPrefix(rest, "<command-") {
+		return s
+	}
+	changed := false
+	for strings.HasPrefix(rest, "<command-") {
+		end := strings.IndexByte(rest, '>')
+		if end < 0 {
+			break
+		}
+		tag := rest[1:end]
+		if !isCommandWrapperTag(tag) {
+			break
+		}
+		closing := "</" + tag + ">"
+		closeAt := strings.Index(rest, closing)
+		if closeAt < 0 {
+			break
+		}
+		rest = rest[closeAt+len(closing):]
+		rest = strings.TrimLeft(rest, " \t\r\n")
+		changed = true
+	}
+	if !changed {
+		return s
+	}
+	return rest
+}
+
+func isCommandWrapperTag(tag string) bool {
+	switch tag {
+	case "command-name", "command-message", "command-args",
+		"command-stdout", "command-stderr":
+		return true
+	}
+	return false
 }
 
 // shortAgentID returns a recognizable prefix of a Claude Code agent id

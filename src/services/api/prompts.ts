@@ -1,6 +1,7 @@
 import { apiClient } from './client';
 import type {
   PromptDetail,
+  PromptSearchResponse,
   PromptTemplate,
   PromptTemplatesResponse,
   PromptUsersResponse,
@@ -107,6 +108,28 @@ export const promptsApi = {
       timeout: PROMPTS_TIMEOUT_MS,
       params: { headers_only: 1 },
     }),
+
+  /**
+   * Case-insensitive substring search over Message.prompt for one key.
+   * Returns flat hits (no tree shape) so the UI can render a single list
+   * with [cwd] [time] [excerpt] rows. Subagent hits carry their parent's
+   * `cwd` / `session_id` so clicking deep-links into the parent's reading
+   * pane the same way the tree does.
+   *
+   * Caller must pass q with at least 2 chars after trim — the server
+   * rejects shorter queries with 400 to avoid useless renders.
+   */
+  searchMessages: (keyOrHash: string, q: string, limit?: number) =>
+    apiClient.get<PromptSearchResponse>(
+      `/prompts/users/${encodeURIComponent(keyOrHash)}/search`,
+      {
+        timeout: PROMPTS_TIMEOUT_MS,
+        params: {
+          q,
+          ...(limit ? { limit } : {}),
+        },
+      },
+    ),
 
   listTemplates: () =>
     apiClient.get<PromptTemplatesResponse>('/prompts/templates', {

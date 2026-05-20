@@ -196,6 +196,52 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 		}
 		c.JSON(http.StatusOK, detail)
 	})
+
+	// Case-insensitive substring search over Message.Prompt for one key.
+	// Separate route (not a query-param on /:key) because the response shape
+	// is flat hits, not the CWD tree — collapsing them onto one URL would
+	// force the client to introspect the JSON to know what to render.
+	engine.GET("/v0/management/prompts/users/:key/search", auth, func(c *gin.Context) {
+		raw := c.Param("key")
+		if raw == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key"})
+			return
+		}
+		q := strings.TrimSpace(c.Query("q"))
+		// Min 2 chars: single-char queries match almost every English
+		// prompt and force the client into a useless render. Max 200 is
+		// a sanity cap — a longer query is almost certainly a copy-paste
+		// of the whole prompt and won't match anything anyway.
+		if len([]rune(q)) < 2 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "q must be at least 2 characters"})
+			return
+		}
+		if len(q) > 200 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "q too long (max 200 chars)"})
+			return
+		}
+
+		var keyHash string
+		if IsHexKeyHash(raw) {
+			keyHash = strings.ToLower(raw)
+		} else {
+			keyHash = ratelimit.HashKey(raw)
+		}
+
+		limit := 200
+		if v := c.Query("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+				limit = n
+			}
+		}
+
+		res, err := SearchMessages(plogCfg.Dir, keyHash, q, limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, res)
+	})
 }
 
 func disabledHandler(c *gin.Context) {

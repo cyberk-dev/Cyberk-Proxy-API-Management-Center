@@ -125,6 +125,61 @@ func TestHandler_SessionBeforeMalformed(t *testing.T) {
 	}
 }
 
+func TestHandler_SearchRejectsShortQuery(t *testing.T) {
+	engine, secret := newReadHandlerRig(t)
+	// URL-encoded forms: "" (missing param), " " (single space), "a"
+	// (single char), " b " (trimmed to one char).
+	cases := []string{"", "%20", "a", "%20b%20"}
+	for _, q := range cases {
+		rr := doReadGet(engine, "/v0/management/prompts/users/sk-x/search?q="+q, secret)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("q=%q status=%d want 400, body=%s", q, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestHandler_SearchRejectsTooLongQuery(t *testing.T) {
+	engine, secret := newReadHandlerRig(t)
+	long := ""
+	for i := 0; i < 201; i++ {
+		long += "a"
+	}
+	rr := doReadGet(engine, "/v0/management/prompts/users/sk-x/search?q="+long, secret)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandler_SearchHappyPath(t *testing.T) {
+	engine, secret := newReadHandlerRig(t)
+	// Seeded entry has Prompt="x" which is below the 2-char min — re-seed
+	// with a real prompt so we can verify the search path.
+	dir := t.TempDir()
+	writeJSONL(t, dir, "2026-05-17", Entry{
+		KeyHash:   ratelimit.HashKey("sk-x"),
+		SessionID: "s",
+		CWD:       "/p",
+		Prompt:    "fix the auth bug today",
+	})
+	plogCfg := &Config{Enabled: true, Dir: dir}
+	proxyCfg := &config.Config{}
+	proxyCfg.RemoteManagement.SecretKey = secret
+	proxyCfg.APIKeys = []string{"sk-x"}
+	engine = gin.New()
+	RegisterReadHandlers(engine, proxyCfg, plogCfg, nil)
+
+	rr := doReadGet(engine, "/v0/management/prompts/users/sk-x/search?q=auth", secret)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !contains(rr.Body.String(), "\"matches\"") {
+		t.Errorf("expected matches field in response: %s", rr.Body.String())
+	}
+	if !contains(rr.Body.String(), "auth") {
+		t.Errorf("expected match excerpt to contain query: %s", rr.Body.String())
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
 }
