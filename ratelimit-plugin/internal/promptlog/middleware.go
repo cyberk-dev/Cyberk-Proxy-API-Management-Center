@@ -64,16 +64,6 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		}
 
 		blocks := extractBlocks(peek.Body, provider, cfg.MaxTextBytes)
-		if len(blocks) == 0 || isToolOnly(blocks) {
-			// Nothing human-authored: empty extraction (no user-role message,
-			// wrapper-noise only) or pure agent-loop continuation whose last
-			// user message is just tool_use / tool_result references. Logging
-			// the latter would balloon entry count without adding new prompt
-			// content (the assistant turn that issued the tool call is not in
-			// this request's user-role content).
-			c.Next()
-			return
-		}
 
 		sysText := extractSystemText(peek.Body, provider)
 		cwd := extractCWD(sysText)
@@ -88,6 +78,8 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		// dispatches (KindSubagent) used to be dropped here too, but are
 		// now kept and recorded with AgentID / ParentSessionID so the
 		// reader can render them indented under their dispatching parent.
+		// Stays a full early-return: we don't want assistant entries from
+		// title-gen calls surfacing in the UI either.
 		if res.Kind == KindTitleGen {
 			c.Next()
 			return
@@ -96,27 +88,43 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		keyHash := ratelimit.HashKey(ratelimit.ExtractAPIKey(c.Request))
 		model := ratelimit.ExtractModel(c)
 
-		entry := &Entry{
-			Timestamp:       time.Now().UTC(),
-			Provider:        provider,
-			Path:            path,
-			Role:            "user",
-			Model:           model,
-			KeyHash:         keyHash,
-			Client:          client.Name,
-			ClientVersion:   client.Version,
-			SessionID:       client.SessionID,
-			CWD:             cwd,
-			AgentID:         res.AgentID,
-			ParentSessionID: res.ParentSessionID,
-			Prompt:          joinPromptText(blocks),
-			Blocks:          blocks,
-			BodyTruncated:   peek.Truncated,
+		// Whether the user message in this request carries fresh human
+		// content. False on agent-loop continuations whose last user-role
+		// message is just tool_result references — those are logged on the
+		// turn where the human prompt first appeared, and re-logging them
+		// every loop iteration would inflate entry count without adding
+		// new prompt information. The flag gates user-side submission
+		// only; the assistant response is captured either way so the
+		// later turns of a tool loop still surface in the UI.
+		hasUserContent := len(blocks) > 0 && !isToolOnly(blocks)
+
+		var entry *Entry
+		if hasUserContent {
+			entry = &Entry{
+				Timestamp:       time.Now().UTC(),
+				Provider:        provider,
+				Path:            path,
+				Role:            "user",
+				Model:           model,
+				KeyHash:         keyHash,
+				Client:          client.Name,
+				ClientVersion:   client.Version,
+				SessionID:       client.SessionID,
+				CWD:             cwd,
+				AgentID:         res.AgentID,
+				ParentSessionID: res.ParentSessionID,
+				Prompt:          joinPromptText(blocks),
+				Blocks:          blocks,
+				BodyTruncated:   peek.Truncated,
+			}
 		}
 
 		// Install the response capturer BEFORE c.Next() so the wrapper sees
 		// every Write the downstream handler emits. Skipped entirely when
 		// assistant logging is off: avoids any allocation on the hot path.
+		// Installed regardless of `hasUserContent` so tool-loop continuation
+		// turns (where the user message is just tool_result) still capture
+		// the assistant's tool_use / final text reply.
 		var capturer *responseCapturer
 		if cfg.LogAssistantResponse && cfg.MaxResponseBytes > 0 {
 			capturer = newResponseCapturer(c.Writer, cfg.MaxResponseBytes)
@@ -126,8 +134,10 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		c.Next()
 
 		status := c.Writer.Status()
-		entry.Status = status
-		writer.Submit(entry)
+		if entry != nil {
+			entry.Status = status
+			writer.Submit(entry)
+		}
 
 		// Only build an assistant entry when the response is plausibly a
 		// model reply. 2xx bodies cover both streaming SSE (status 200, body

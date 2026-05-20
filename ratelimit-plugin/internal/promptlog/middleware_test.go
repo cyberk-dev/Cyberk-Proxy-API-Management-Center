@@ -461,6 +461,290 @@ func TestMiddleware_AssistantSkipsOnErrorStatus(t *testing.T) {
 	}
 }
 
+// Agent-loop continuation tests: each provider has a "last message is not a
+// fresh user prompt" shape (Anthropic: user content is only tool_result;
+// OpenAI Chat: role:"tool"; OpenAI Responses: function_call_output; Gemini:
+// user content is only functionResponse). In every case the human prompt was
+// already logged on the turn it first appeared, so the middleware suppresses
+// the user-side entry — but MUST still capture the assistant response, which
+// carries the next tool_use or the final text answer. The previous behavior
+// was to bail out entirely, which dropped both sides and left the UI showing
+// only turn 1 of a multi-tool-call session.
+
+func TestMiddleware_AssistantCapturedOnAnthropicToolLoop(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	cfg := &Config{
+		Enabled:              true,
+		Dir:                  dir,
+		MaxTextBytes:         1024,
+		QueueSize:            16,
+		LogAssistantResponse: true,
+		MaxResponseBytes:     64 * 1024,
+	}
+	r := gin.New()
+	r.Use(Middleware(cfg, w))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"id":      "msg_2",
+			"role":    "assistant",
+			"content": []gin.H{{"type": "text", "text": "the answer is 42"}},
+		})
+	})
+
+	// Tool-loop continuation: assistant emitted a tool_use last turn, client
+	// now POSTs the conversation back with the tool_result appended as the
+	// new last user-role message. extractBlocks returns [tool_result], which
+	// is isToolOnly — user-side must be suppressed, assistant-side must not.
+	body := `{"model":"claude","messages":[` +
+		`{"role":"user","content":"compute 6*7"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"calc","input":{"expr":"6*7"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"42"}]}` +
+		`]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 assistant entry (user suppressed), got %d: %+v", len(entries), entries)
+	}
+	if role, _ := entries[0]["role"].(string); role != "assistant" {
+		t.Errorf("expected role=assistant, got %q", role)
+	}
+	if entries[0]["prompt"] != "the answer is 42" {
+		t.Errorf("assistant prompt=%v", entries[0]["prompt"])
+	}
+}
+
+func TestMiddleware_AssistantCapturedOnAnthropicSSEToolLoop(t *testing.T) {
+	// SSE variant — production traffic is almost always streamed, so the
+	// JSON-shaped test above misses the dominant path. Handler emits a
+	// minimal Anthropic stream (one text block) so parseAnthropicSSE has
+	// to assemble it.
+	dir := t.TempDir()
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	cfg := &Config{
+		Enabled:              true,
+		Dir:                  dir,
+		MaxTextBytes:         1024,
+		QueueSize:            16,
+		LogAssistantResponse: true,
+		MaxResponseBytes:     64 * 1024,
+	}
+	r := gin.New()
+	r.Use(Middleware(cfg, w))
+	r.POST("/v1/messages", func(c *gin.Context) {
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.WriteHeader(http.StatusOK)
+		// Minimal frame set: open a text block, deliver one delta, close.
+		// parseAnthropicSSE only needs content_block_start + _delta to
+		// produce a text block; message_start / message_delta / stop are
+		// ignored here for brevity.
+		_, _ = c.Writer.Write([]byte(
+			"event: content_block_start\n" +
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+				"event: content_block_delta\n" +
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"the answer is 42"}}` + "\n\n",
+		))
+	})
+
+	body := `{"model":"claude","messages":[` +
+		`{"role":"user","content":"compute 6*7"},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"calc","input":{"expr":"6*7"}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"42"}]}` +
+		`]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 assistant entry (user suppressed), got %d: %+v", len(entries), entries)
+	}
+	if role, _ := entries[0]["role"].(string); role != "assistant" {
+		t.Errorf("expected role=assistant, got %q", role)
+	}
+	if entries[0]["prompt"] != "the answer is 42" {
+		t.Errorf("assistant prompt=%v", entries[0]["prompt"])
+	}
+}
+
+func TestMiddleware_AssistantCapturedOnOpenAIChatToolLoop(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	cfg := &Config{
+		Enabled:              true,
+		Dir:                  dir,
+		MaxTextBytes:         1024,
+		QueueSize:            16,
+		LogAssistantResponse: true,
+		MaxResponseBytes:     64 * 1024,
+	}
+	r := gin.New()
+	r.Use(Middleware(cfg, w))
+	r.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"choices": []gin.H{
+				{"message": gin.H{"role": "assistant", "content": "the answer is 42"}},
+			},
+		})
+	})
+
+	// OpenAI Chat tool-loop continuation: last message has role:"tool"
+	// (NOT "user"). extractIfLastIsUser returns nil → blocks empty → user
+	// entry must be suppressed. Assistant capture must still happen.
+	body := `{"model":"gpt-4","messages":[` +
+		`{"role":"user","content":"compute 6*7"},` +
+		`{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calc","arguments":"{\"expr\":\"6*7\"}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"42"}` +
+		`]}`
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 assistant entry (user suppressed), got %d: %+v", len(entries), entries)
+	}
+	if role, _ := entries[0]["role"].(string); role != "assistant" {
+		t.Errorf("expected role=assistant, got %q", role)
+	}
+	if entries[0]["prompt"] != "the answer is 42" {
+		t.Errorf("assistant prompt=%v", entries[0]["prompt"])
+	}
+}
+
+func TestMiddleware_AssistantCapturedOnOpenAIResponsesToolLoop(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	cfg := &Config{
+		Enabled:              true,
+		Dir:                  dir,
+		MaxTextBytes:         1024,
+		QueueSize:            16,
+		LogAssistantResponse: true,
+		MaxResponseBytes:     64 * 1024,
+	}
+	r := gin.New()
+	r.Use(Middleware(cfg, w))
+	r.POST("/v1/responses", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"output": []gin.H{
+				{
+					"type": "message",
+					"content": []gin.H{
+						{"type": "output_text", "text": "the answer is 42"},
+					},
+				},
+			},
+		})
+	})
+
+	// OpenAI Responses tool-loop continuation: last input item is a typed
+	// function_call_output (no role). lastUserContent returns false →
+	// blocks nil → user entry suppressed; assistant capture must still fire.
+	body := `{"model":"gpt-5","input":[` +
+		`{"role":"user","content":[{"type":"input_text","text":"compute 6*7"}]},` +
+		`{"type":"function_call","name":"calc","arguments":"{\"expr\":\"6*7\"}","call_id":"call_1"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":"42"}` +
+		`]}`
+	req, _ := http.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 assistant entry (user suppressed), got %d: %+v", len(entries), entries)
+	}
+	if role, _ := entries[0]["role"].(string); role != "assistant" {
+		t.Errorf("expected role=assistant, got %q", role)
+	}
+	if entries[0]["prompt"] != "the answer is 42" {
+		t.Errorf("assistant prompt=%v", entries[0]["prompt"])
+	}
+}
+
+func TestMiddleware_AssistantCapturedOnGeminiToolLoop(t *testing.T) {
+	dir := t.TempDir()
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	cfg := &Config{
+		Enabled:              true,
+		Dir:                  dir,
+		MaxTextBytes:         1024,
+		QueueSize:            16,
+		LogAssistantResponse: true,
+		MaxResponseBytes:     64 * 1024,
+	}
+	r := gin.New()
+	r.Use(Middleware(cfg, w))
+	r.POST("/v1beta/models/gemini-2.5-pro:generateContent", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"candidates": []gin.H{
+				{
+					"content": gin.H{
+						"parts": []gin.H{{"text": "the answer is 42"}},
+					},
+				},
+			},
+		})
+	})
+
+	// Gemini tool-loop continuation: last role:"user" content carries only
+	// a functionResponse part (the tool result). extractGeminiPart maps it
+	// to a tool_result block → isToolOnly true → user entry suppressed,
+	// assistant capture must still fire.
+	body := `{"contents":[` +
+		`{"role":"user","parts":[{"text":"compute 6*7"}]},` +
+		`{"role":"model","parts":[{"functionCall":{"name":"calc","args":{"expr":"6*7"}}}]},` +
+		`{"role":"user","parts":[{"functionResponse":{"name":"calc","response":{"result":42}}}]}` +
+		`]}`
+	req, _ := http.NewRequest("POST", "/v1beta/models/gemini-2.5-pro:generateContent", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 assistant entry (user suppressed), got %d: %+v", len(entries), entries)
+	}
+	if role, _ := entries[0]["role"].(string); role != "assistant" {
+		t.Errorf("expected role=assistant, got %q", role)
+	}
+	if entries[0]["prompt"] != "the answer is 42" {
+		t.Errorf("assistant prompt=%v", entries[0]["prompt"])
+	}
+}
+
 func readAllEntries(t *testing.T, dir string) []map[string]any {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(dir, "prompts-*.jsonl"))
