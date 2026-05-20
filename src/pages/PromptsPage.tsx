@@ -134,26 +134,33 @@ function HighlightedExcerpt({ text, query }: { text: string; query: string }) {
 
 type SessionRef = { cwd: string; sid: string };
 
-// Bodies that start with one of these bracket tags are the assistant's
-// internal scratch (chain-of-thought thinking, tool dispatch, tool result).
-// They're useful but verbose — a single session can have dozens between two
-// user turns. We collapse runs of >3 such rows so the timeline stays
-// scannable; the user expands a run by clicking its show-more chip.
-const INTERNAL_ROW_PATTERN = /^\[(?:thinking|tool_use|tool_result)\b/;
+// Maximum visible rows in an assistant run before the rest collapse behind
+// a "Show N more" chip. 2 matches the user's stated preference — a normal
+// "one tool call + one short reply" interaction (run.length === 2) stays
+// fully visible; only longer agent excursions collapse.
+const ASSISTANT_RUN_THRESHOLD = 2;
 
-function isInternalRow(msg: PromptMessage): boolean {
-  const body = msg.prompt ?? '';
-  return INTERNAL_ROW_PATTERN.test(body);
+// An "assistant run" is consecutive role==='assistant' rows that are NOT
+// subagent dispatches. Subagents render with their own indent + chip from
+// prior UI work (see [[ratelimit_plugin_feature_scope]] context), and
+// hiding them behind a collapse would defeat the signal that work was
+// added specifically to surface. The run boundary therefore also breaks
+// on is_subagent transitions, keeping each subagent run as its own visible
+// chunk.
+function isCollapsibleAssistant(msg: PromptMessage): boolean {
+  return msg.role === 'assistant' && msg.is_subagent !== true;
 }
 
 type MessageRunItem =
   | { kind: 'msg'; msg: PromptMessage }
   | { kind: 'collapsed'; runId: string; messages: PromptMessage[] };
 
-// Walk messages in order and group consecutive internal rows. Runs of size
-// > 3 collapse to first-3 + a placeholder unless `expanded` says otherwise.
-// runId = the first message's ts in the run (stable across re-renders that
-// don't shift the run boundary, which only happens on load-older).
+// Walk messages in order and group consecutive collapsible-assistant rows.
+// Runs of size > ASSISTANT_RUN_THRESHOLD collapse to first-N + a placeholder
+// unless `expanded` says otherwise. runId = the first message's ts in the
+// run (stable across re-renders that don't shift the run boundary; only
+// load-older can change it, which is acceptable — the user will see the
+// expansion drop on the rare prepend that fuses runs).
 function buildMessageRuns(
   messages: PromptMessage[],
   expanded: Set<string>,
@@ -161,20 +168,25 @@ function buildMessageRuns(
   const out: MessageRunItem[] = [];
   let i = 0;
   while (i < messages.length) {
-    const m = messages[i];
-    if (!isInternalRow(m)) {
-      out.push({ kind: 'msg', msg: m });
+    if (!isCollapsibleAssistant(messages[i])) {
+      out.push({ kind: 'msg', msg: messages[i] });
       i++;
       continue;
     }
     let j = i;
-    while (j < messages.length && isInternalRow(messages[j])) j++;
+    while (j < messages.length && isCollapsibleAssistant(messages[j])) j++;
     const run = messages.slice(i, j);
-    if (run.length <= 3 || expanded.has(run[0].ts)) {
+    if (run.length <= ASSISTANT_RUN_THRESHOLD || expanded.has(run[0].ts)) {
       for (const r of run) out.push({ kind: 'msg', msg: r });
     } else {
-      for (const r of run.slice(0, 3)) out.push({ kind: 'msg', msg: r });
-      out.push({ kind: 'collapsed', runId: run[0].ts, messages: run.slice(3) });
+      for (const r of run.slice(0, ASSISTANT_RUN_THRESHOLD)) {
+        out.push({ kind: 'msg', msg: r });
+      }
+      out.push({
+        kind: 'collapsed',
+        runId: run[0].ts,
+        messages: run.slice(ASSISTANT_RUN_THRESHOLD),
+      });
     }
     i = j;
   }
@@ -378,9 +390,14 @@ export function PromptsPage() {
   const loadDetail = useCallback(async (keyOrHash: string) => {
     setDetailLoading(true);
     setDetailError('');
-    setSelectedMessageTs(null);
-    setSelectedSessionRef(null);
     setExpandedTemplateInDetail(false);
+    // Intentionally NOT clearing selectedSessionRef / selectedMessageTs /
+    // detail here. Mail.app-style "optimistic stale": keep the previous
+    // key's reading pane visible during the fetch so the user doesn't see
+    // the panel blank out for the request duration (the visible "flash"
+    // they reported). The post-fetch block below replaces detail and
+    // calls setSelectedSessionRef with the new key's first session in the
+    // same React batch, so the swap is one commit.
     setLoadingMoreCWDs(new Set());
     setCwdLoadErrors({});
     setLoadingMoreMessages(new Set());
@@ -413,13 +430,20 @@ export function PromptsPage() {
       // sessions are no longer nested-expanded (the reading pane is panel 2).
       setExpandedCWDs(new Set(res.groups.map((g) => g.cwd)));
       // Auto-select the most-recent session of the most-recent CWD so panel
-      // 2 has content right after load. If the key has zero activity, leave
-      // selection null — the empty-state placeholder in panel 2 takes over.
+      // 2 swaps from the stale previous-key view to fresh content in one
+      // render. Clear stale selection state if no session is available so
+      // the placeholder takes over instead of a session that doesn't exist
+      // in the new detail.
       const firstGroup = res.groups.find((g) => g.sessions.length > 0);
       const firstSession = firstGroup?.sessions[0];
       if (firstGroup && firstSession) {
         setSelectedSessionRef({ cwd: firstGroup.cwd, sid: firstSession.session_id });
+      } else {
+        setSelectedSessionRef(null);
       }
+      // Reset message selection on every key change — the previous key's
+      // ts is meaningless under the new detail.
+      setSelectedMessageTs(null);
       const populated: PromptSession[] = [];
       for (const g of res.groups) populated.push(...g.sessions);
       prewarmTemplates(populated);
@@ -1063,7 +1087,12 @@ export function PromptsPage() {
               selected (the keys list takes the whole column then). */}
           {selectedKey && !keysListExpanded && (
             <div className={styles.treeBody}>
-              {detailLoading ? (
+              {detailLoading && !detail ? (
+                // Same "optimistic stale" rule as panel 2: only show a
+                // spinner when there is genuinely nothing else to show.
+                // During a key switch, the previous key's tree keeps
+                // rendering until the new detail commits — a brief
+                // mismatch with the column header, but no flicker.
                 <div className={styles.loading}><LoadingSpinner /></div>
               ) : !detail || detail.groups.length === 0 ? (
                 <EmptyState
@@ -1238,7 +1267,11 @@ export function PromptsPage() {
                   defaultValue: 'Pick an API key on the left to see its prompt history.',
                 })}
               </div>
-            ) : detailLoading ? (
+            ) : detailLoading && !detail ? (
+              // First-ever load (no prior detail to show) → spinner. On
+              // subsequent key switches, detail still holds the previous
+              // key's data so this branch is skipped and the stale session
+              // pane keeps rendering until the new detail lands.
               <div className={styles.loading}><LoadingSpinner /></div>
             ) : searchResults || searchLoading || searchError ? (
               <SearchResultsView
@@ -1473,8 +1506,8 @@ function SessionReadingPane({
                 className={styles.runMoreRow}
                 onClick={() => toggleRun(it.runId)}
               >
-                {t('prompts_page.show_more_internal', {
-                  defaultValue: 'Show {{n}} more internal rows…',
+                {t('prompts_page.show_more_agent_rows', {
+                  defaultValue: 'Show {{n}} more agent rows…',
                   n: it.messages.length,
                 })}
               </button>
