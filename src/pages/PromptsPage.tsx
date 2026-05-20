@@ -134,6 +134,53 @@ function HighlightedExcerpt({ text, query }: { text: string; query: string }) {
 
 type SessionRef = { cwd: string; sid: string };
 
+// Bodies that start with one of these bracket tags are the assistant's
+// internal scratch (chain-of-thought thinking, tool dispatch, tool result).
+// They're useful but verbose — a single session can have dozens between two
+// user turns. We collapse runs of >3 such rows so the timeline stays
+// scannable; the user expands a run by clicking its show-more chip.
+const INTERNAL_ROW_PATTERN = /^\[(?:thinking|tool_use|tool_result)\b/;
+
+function isInternalRow(msg: PromptMessage): boolean {
+  const body = msg.prompt ?? '';
+  return INTERNAL_ROW_PATTERN.test(body);
+}
+
+type MessageRunItem =
+  | { kind: 'msg'; msg: PromptMessage }
+  | { kind: 'collapsed'; runId: string; messages: PromptMessage[] };
+
+// Walk messages in order and group consecutive internal rows. Runs of size
+// > 3 collapse to first-3 + a placeholder unless `expanded` says otherwise.
+// runId = the first message's ts in the run (stable across re-renders that
+// don't shift the run boundary, which only happens on load-older).
+function buildMessageRuns(
+  messages: PromptMessage[],
+  expanded: Set<string>,
+): MessageRunItem[] {
+  const out: MessageRunItem[] = [];
+  let i = 0;
+  while (i < messages.length) {
+    const m = messages[i];
+    if (!isInternalRow(m)) {
+      out.push({ kind: 'msg', msg: m });
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < messages.length && isInternalRow(messages[j])) j++;
+    const run = messages.slice(i, j);
+    if (run.length <= 3 || expanded.has(run[0].ts)) {
+      for (const r of run) out.push({ kind: 'msg', msg: r });
+    } else {
+      for (const r of run.slice(0, 3)) out.push({ kind: 'msg', msg: r });
+      out.push({ kind: 'collapsed', runId: run[0].ts, messages: run.slice(3) });
+    }
+    i = j;
+  }
+  return out;
+}
+
 export function PromptsPage() {
   const { t } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
@@ -183,8 +230,6 @@ export function PromptsPage() {
 
   const inFlightCWDsRef = useRef<Set<string>>(new Set());
   const inFlightMessagesRef = useRef<Set<string>>(new Set());
-
-  const [pasteInput, setPasteInput] = useState('');
 
   const [inlineTemplates, setInlineTemplates] = useState<boolean>(() => {
     try {
@@ -662,16 +707,27 @@ export function PromptsPage() {
 
   const handleSelectUser = (u: PromptUserSummary) => {
     setSelectedKey(u.key_hash);
-    setPasteInput('');
     // Auto-collapse the keys list once a key is picked so the CWD/sessions
     // tree gets the vertical space. The user can re-expand via Change.
     setKeysListExpanded(false);
   };
 
-  const handlePasteSubmit = (e: React.FormEvent) => {
+  // Enter on the keys filter: if the typed value exactly matches a known
+  // key_hint or key_hash, select that user; otherwise treat it as a direct
+  // lookup (raw API key or 12-char hex hash) and route to setSelectedKey.
+  // Folds the previous standalone "paste API key" form into the same input
+  // so the panel doesn't show two search-shaped boxes.
+  const handleKeysFilterSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const trimmed = pasteInput.trim();
+    const trimmed = keysFilter.trim();
     if (!trimmed) return;
+    const exact = users.find(
+      (u) => u.key_hint === trimmed || u.key_hash === trimmed,
+    );
+    if (exact) {
+      handleSelectUser(exact);
+      return;
+    }
     setSelectedKey(trimmed);
     setKeysListExpanded(false);
   };
@@ -905,12 +961,12 @@ export function PromptsPage() {
                   <IconChevronLeft size={14} />
                 </button>
               </div>
-              <div className={styles.keysFilterRow}>
+              <form onSubmit={handleKeysFilterSubmit} className={styles.keysFilterRow}>
                 <Input
                   value={keysFilter}
                   onChange={(e) => setKeysFilter(e.target.value)}
                   placeholder={t('prompts_page.keys_filter_placeholder', {
-                    defaultValue: 'Filter keys…',
+                    defaultValue: 'Filter or paste key/hash…',
                   })}
                   className={styles.keysFilterInput}
                   rightElement={
@@ -928,19 +984,10 @@ export function PromptsPage() {
                     )
                   }
                 />
-              </div>
-              <form onSubmit={handlePasteSubmit} className={styles.pasteRow}>
-                <Input
-                  value={pasteInput}
-                  onChange={(e) => setPasteInput(e.target.value)}
-                  placeholder={t('prompts_page.paste_placeholder', {
-                    defaultValue: 'Paste API key or 12-char hash…',
-                  })}
-                  className={styles.pasteInput}
-                />
                 <span className={styles.pasteHint}>
-                  {t('prompts_page.paste_hint', {
-                    defaultValue: 'Press Enter to look up a key outside the configured list.',
+                  {t('prompts_page.keys_filter_hint', {
+                    defaultValue:
+                      'Press Enter to look up a key/hash that is not in the list.',
                   })}
                 </span>
               </form>
@@ -1209,6 +1256,7 @@ export function PromptsPage() {
               </div>
             ) : (
               <SessionReadingPane
+                key={selectedSession.session_id}
                 session={selectedSession}
                 cwd={selectedSessionRef?.cwd ?? '(unknown)'}
                 templateCache={templateCache}
@@ -1343,6 +1391,28 @@ function SessionReadingPane({
   const { t } = useTranslation();
   const cwdLabel = formatCwdLabel(cwd);
 
+  // Per-run expansion state. Keyed by runId (the first message's ts in the
+  // run) so it stays stable across re-renders that don't shift the run
+  // boundary. Reset on session change is handled by a `key=session_id` prop
+  // on this component in the parent — switching sessions remounts the
+  // subtree, which is cleaner than a reset useEffect (no lint flag, no
+  // cascading-render churn).
+  const [expandedRuns, setExpandedRuns] = useState<Set<string>>(new Set());
+
+  const items = useMemo(
+    () => buildMessageRuns(session.messages, expandedRuns),
+    [session.messages, expandedRuns],
+  );
+
+  const toggleRun = (runId: string) => {
+    setExpandedRuns((prev) => {
+      const next = new Set(prev);
+      if (next.has(runId)) next.delete(runId);
+      else next.add(runId);
+      return next;
+    });
+  };
+
   return (
     <div className={styles.sessionPane}>
       <div className={styles.sessionPaneHeader}>
@@ -1394,7 +1464,23 @@ function SessionReadingPane({
             )}
           </>
         )}
-        {session.messages.map((msg) => {
+        {items.map((it) => {
+          if (it.kind === 'collapsed') {
+            return (
+              <button
+                key={`run::${it.runId}`}
+                type="button"
+                className={styles.runMoreRow}
+                onClick={() => toggleRun(it.runId)}
+              >
+                {t('prompts_page.show_more_internal', {
+                  defaultValue: 'Show {{n}} more internal rows…',
+                  n: it.messages.length,
+                })}
+              </button>
+            );
+          }
+          const msg = it.msg;
           const key = `${session.session_id}::${msg.ts}`;
           const isSelected = key === selectedMessageKey;
           const tplHash = msg.prompt_template;
