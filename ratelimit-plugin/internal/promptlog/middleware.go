@@ -75,27 +75,20 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 			return
 		}
 
-		client := IdentifyClient(c.Request.Header)
-		cwd := extractCWD(extractSystemText(peek.Body, provider))
+		sysText := extractSystemText(peek.Body, provider)
+		cwd := extractCWD(sysText)
+		res := identifyRequest(c.Request.Header, sysHead(sysText, 256))
+		client := res.Client
 
-		// Drop sub-call dispatches: synthetic agent infrastructure (title
-		// generation, subagent Task dispatches, auto-summarization, etc.)
-		// reuses the parent's session_id but ships a system prompt without
-		// the env block, so cwd extraction returns "". Logging them creates
-		// a duplicate "(unknown)" session card in the UI alongside the real
-		// (project_cwd, sid) one — same conversation surfaced twice.
-		//
-		// Two signals cover the observed cases:
-		//   - SessionID != "": opencode 1.15+ runs a parallel gpt-5-nano
-		//     title-gen call per turn that copies the user message but ships
-		//     a "You are a title generator…" system prompt; the Session_id
-		//     header is identical to the main chat. Any future CLI with the
-		//     same shape (Codex CLI sub-calls) is covered too.
-		//   - Name == ClientClaudeCode: Task tool dispatches (web search,
-		//     Explore, Plan, custom subagents) on Claude Code versions
-		//     < 2.1.97 that don't yet send X-Claude-Code-Session-Id, so the
-		//     SessionID signal above wouldn't fire.
-		if cwd == "" && (client.SessionID != "" || client.Name == ClientClaudeCode) {
+		// Title-gen is pure infrastructure noise (one-shot model call that
+		// summarizes the user message into a thread title — gpt-5-nano on
+		// opencode, claude-haiku-shape on Claude Code). It carries no
+		// conversation value and would otherwise clutter the Prompts UI
+		// with one extra "(unknown)" session card per turn. Subagent
+		// dispatches (KindSubagent) used to be dropped here too, but are
+		// now kept and recorded with AgentID / ParentSessionID so the
+		// reader can render them indented under their dispatching parent.
+		if res.Kind == KindTitleGen {
 			c.Next()
 			return
 		}
@@ -104,19 +97,21 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 		model := ratelimit.ExtractModel(c)
 
 		entry := &Entry{
-			Timestamp:     time.Now().UTC(),
-			Provider:      provider,
-			Path:          path,
-			Role:          "user",
-			Model:         model,
-			KeyHash:       keyHash,
-			Client:        client.Name,
-			ClientVersion: client.Version,
-			SessionID:     client.SessionID,
-			CWD:           cwd,
-			Prompt:        joinPromptText(blocks),
-			Blocks:        blocks,
-			BodyTruncated: peek.Truncated,
+			Timestamp:       time.Now().UTC(),
+			Provider:        provider,
+			Path:            path,
+			Role:            "user",
+			Model:           model,
+			KeyHash:         keyHash,
+			Client:          client.Name,
+			ClientVersion:   client.Version,
+			SessionID:       client.SessionID,
+			CWD:             cwd,
+			AgentID:         res.AgentID,
+			ParentSessionID: res.ParentSessionID,
+			Prompt:          joinPromptText(blocks),
+			Blocks:          blocks,
+			BodyTruncated:   peek.Truncated,
 		}
 
 		// Install the response capturer BEFORE c.Next() so the wrapper sees
@@ -159,20 +154,58 @@ func Middleware(cfg *Config, writer *Writer) gin.HandlerFunc {
 			return
 		}
 		writer.Submit(&Entry{
-			Timestamp:     time.Now().UTC(),
-			Provider:      provider,
-			Path:          path,
-			Status:        status,
-			Role:          "assistant",
-			Model:         model,
-			KeyHash:       keyHash,
-			Client:        client.Name,
-			ClientVersion: client.Version,
-			SessionID:     client.SessionID,
-			CWD:           cwd,
-			Prompt:        joinPromptText(respBlocks),
-			Blocks:        respBlocks,
-			BodyTruncated: capturer.Truncated(),
+			Timestamp:       time.Now().UTC(),
+			Provider:        provider,
+			Path:            path,
+			Status:          status,
+			Role:            "assistant",
+			Model:           model,
+			KeyHash:         keyHash,
+			Client:          client.Name,
+			ClientVersion:   client.Version,
+			SessionID:       client.SessionID,
+			CWD:             cwd,
+			AgentID:         res.AgentID,
+			ParentSessionID: res.ParentSessionID,
+			Prompt:          joinPromptText(respBlocks),
+			Blocks:          respBlocks,
+			BodyTruncated:   capturer.Truncated(),
 		})
 	}
+}
+
+// sysHead returns a normalized prefix of system text for detector matching:
+// lowercased + capped at maxLen, with a leading Claude-Code-style
+// "x-anthropic-billing-header" preamble stripped when present. Detectors
+// rely on this so they can do plain HasPrefix checks against title-gen
+// fingerprints (always lowercase here) without caring about wrapper
+// billing-headers or letter case in the wire prompt.
+//
+// The preamble strip is gated on "x-anthropic-billing-header" actually
+// appearing in the first scan window — otherwise a user-authored system
+// prompt with a blank line in the first paragraph could lose that
+// paragraph silently. Scan window must be larger than maxLen so the
+// gating works for any preamble that fits within it.
+func sysHead(systemText string, maxLen int) string {
+	if systemText == "" {
+		return ""
+	}
+	const scanWindow = 1024
+	head := systemText
+	if len(head) > scanWindow {
+		head = head[:scanWindow]
+	}
+	// Strip the Claude Code billing-header preamble only when its marker is
+	// actually present in the scan window. The marker terminates with a
+	// blank line; jump past that. Other system prompts pass through whole.
+	if strings.Contains(head, "x-anthropic-billing-header") {
+		if idx := strings.Index(head, "\n\n"); idx >= 0 {
+			head = head[idx+2:]
+		}
+	}
+	head = strings.TrimLeft(head, " \t\r\n")
+	if len(head) > maxLen {
+		head = head[:maxLen]
+	}
+	return strings.ToLower(head)
 }

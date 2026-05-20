@@ -55,6 +55,21 @@ export interface PromptMessage {
    */
   prompt_template?: string;
   blocks?: PromptBlock[];
+  /**
+   * Set by the reader when this message was logged inside a subagent
+   * dispatch (Claude Code Task tool or opencode child session) and the
+   * parent session was found in the same scan. The UI renders these rows
+   * indented under the dispatching parent's row so the conversation reads
+   * as one thread. Orphan subagent entries — parent rolled out of
+   * retention — render as ordinary messages (this flag stays false).
+   */
+  is_subagent?: boolean;
+  /**
+   * Short identifier of the subagent run, displayed in the indent chip.
+   * - Claude Code: first 8 chars of `X-Claude-Code-Agent-Id`.
+   * - opencode: last 8 chars of the subagent's `Session_id` (after `ses_`).
+   */
+  subagent_id?: string;
 }
 
 export interface PromptTemplate {

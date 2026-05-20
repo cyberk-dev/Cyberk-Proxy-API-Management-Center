@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -309,6 +310,15 @@ type Session struct {
 // The UI reconstructs the full text by fetching /templates/:hash and
 // concatenating, OR the caller can pass `?inline_templates=1` to BuildDetail
 // so the server splices the template back in.
+//
+// IsSubagent / SubagentID are set during the second-pass bucketing in
+// BuildDetail when an entry has been linked to a parent (Claude Code via
+// shared SessionID + AgentID; opencode via ParentSessionID). The UI uses
+// them to render the row indented under its dispatching parent. Orphan
+// subagent entries (no parent in retention) leave both at zero values and
+// render as ordinary messages — the on-disk Entry still carries AgentID /
+// ParentSessionID so a later scan can re-link them once the parent is in
+// scope again.
 type Message struct {
 	Timestamp      time.Time `json:"ts"`
 	Model          string    `json:"model,omitempty"`
@@ -318,6 +328,8 @@ type Message struct {
 	Prompt         string    `json:"prompt"`
 	PromptTemplate string    `json:"prompt_template,omitempty"`
 	Blocks         []Block   `json:"blocks,omitempty"`
+	IsSubagent     bool      `json:"is_subagent,omitempty"`
+	SubagentID     string    `json:"subagent_id,omitempty"`
 }
 
 // InlineTemplates rewrites every Message in detail by splicing the matching
@@ -393,9 +405,12 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 		firstSeen     time.Time
 		lastSeen      time.Time
 		msgs          []Message
-		// total counts every entry for this session, regardless of filters.
-		// Drives MessageCount in the response so the UI can show "X of Y"
-		// even when a cursor narrows the returned window.
+		// total counts every entry routed into this aggregate, regardless of
+		// filters. Drives MessageCount in the response so the UI can show
+		// "X of Y" even when a cursor narrows the returned window. For
+		// opencode subagent merges, this INCLUDES the subagent turns merged
+		// into the parent's session — the UI's "Nm" badge intentionally
+		// reflects the visible conversation length, subagent rows included.
 		total int
 		// eligibleCount counts entries that survived MessageBefore filtering.
 		// Truncated is `eligibleCount > len(msgs)` — answers "is there an
@@ -412,19 +427,85 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 	totalSessions := map[string]struct{}{}
 	totalMessages := 0
 
+	// Two-pass scan to support subagent → parent linking. Pass 1
+	// materializes every entry for this key into a flat slice AND records
+	// the (cwd, session_id) of each parent turn into parentBySession. A
+	// "parent turn" is any entry that has no subagent markers (AgentID /
+	// ParentSessionID both empty) and a non-empty CWD — i.e. the kind of
+	// entry that originates a real session card. Pass 2 walks the slice
+	// and routes each entry to its render bucket: subagents inherit their
+	// parent's (cwd, session_id) when found, falling back to the entry's
+	// own CWD ("(unknown)" if empty) otherwise.
+	//
+	// Memory cost is one []Entry per key, bounded by retention window —
+	// well within the existing per-session aggregates this function
+	// already builds in memory. On-disk SessionID / CWD are never
+	// rewritten; linking is purely a render-time decision so a later
+	// scan can re-render differently if needed.
+	type parentRef struct {
+		cwd string
+		sid string
+	}
+	parentBySession := map[string]parentRef{}
+	entries := make([]Entry, 0, 256)
 	if err := scanAll(dir, func(e Entry) bool {
 		if e.KeyHash != keyHash {
 			return true
 		}
-		cwd := e.CWD
+		// Blocks is the heavy field (image metadata, tool refs, base64
+		// fingerprints) and the tree response never includes it — the
+		// per-message detail endpoint fetches it lazily on click. Drop
+		// before materializing so pass 1's []Entry stays roughly the
+		// same memory footprint as the existing per-session aggregates.
+		e.Blocks = nil
+		entries = append(entries, e)
+		if e.AgentID == "" && e.ParentSessionID == "" && e.CWD != "" && e.SessionID != "" {
+			// Last-writer-wins is fine: multiple parent turns in the same
+			// session must agree on CWD (the env block doesn't change
+			// mid-session), so the final stored value is just the most
+			// recent observation.
+			parentBySession[e.SessionID] = parentRef{cwd: e.CWD, sid: e.SessionID}
+		}
+		return true
+	}); err != nil {
+		return nil, err
+	}
+
+	for _, e := range entries {
+		// Bucket decision: resolve subagent → parent, else passthrough.
+		// Raw e.CWD / e.SessionID stay untouched on disk — bucketCWD /
+		// bucketSID are the render-time keys only.
+		bucketCWD, bucketSID := e.CWD, e.SessionID
+		isSub, subID := false, ""
+		switch {
+		case e.AgentID != "" && e.SessionID != "":
+			// Claude Code subagent: shares parent's SessionID. Look up
+			// the parent's CWD; on miss (orphan — parent rolled out of
+			// retention) fall through with the entry's own CWD, which
+			// will normalize to "(unknown)" below since subagent
+			// dispatches typically have no env block.
+			if p, ok := parentBySession[e.SessionID]; ok {
+				bucketCWD = p.cwd
+				isSub, subID = true, shortAgentID(e.AgentID)
+			}
+		case e.ParentSessionID != "":
+			// opencode subagent: parent_session_id points to the
+			// spawning session, which has a different SessionID. Merge
+			// the subagent's messages into the parent's session card
+			// when the parent is found; otherwise the orphan keeps its
+			// own session id and renders as a separate card.
+			if p, ok := parentBySession[e.ParentSessionID]; ok {
+				bucketCWD, bucketSID = p.cwd, p.sid
+				isSub, subID = true, shortSessionID(e.SessionID)
+			}
+		}
+
+		cwd := bucketCWD
 		if cwd == "" {
 			cwd = "(unknown)"
 		}
-		// Short-circuit when the caller scoped to one CWD: this is the load-
-		// more / refresh-cwd path and we don't want to spend any aggregate
-		// work on neighboring CWDs.
 		if opts.CWDFilter != "" && cwd != opts.CWDFilter {
-			return true
+			continue
 		}
 		totalMessages++
 		c := byCWD[cwd]
@@ -437,10 +518,8 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 			c.lastSeen = e.Timestamp
 		}
 
-		sid := e.SessionID
+		sid := bucketSID
 		if sid == "" {
-			// Synthesize a per-cwd "no-session" bucket so messages without a
-			// session header still appear in the tree.
 			sid = "(no-session)"
 		}
 		totalSessions[cwd+"|"+sid] = struct{}{}
@@ -468,50 +547,34 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 		if e.Timestamp.Before(s.firstSeen) {
 			s.firstSeen = e.Timestamp
 		}
-		// Skip the per-message slice append on the headers_only fast
-		// path — we only need counts/timestamps for that response, and
-		// the slice append (with its periodic re-slice for the sliding
-		// window) is the hot allocation in this scan.
-		if !opts.HeadersOnly {
-			// SessionFilter narrows the response to one session, so we
-			// don't need to allocate Messages for sessions we'll discard
-			// when building groups. CWD-level counters (msgCount,
-			// lastSeen, SessionCount via len(c.sessions)) still get
-			// updated above so the UI's "session 1 of N" stays accurate.
-			if opts.SessionFilter != "" && sid != opts.SessionFilter {
-				return true
-			}
-			// MessageBefore is the message-page cursor: only entries
-			// strictly older count. eligibleCount tracks how many
-			// survived; Truncated below uses it instead of s.total.
-			if !opts.MessageBefore.IsZero() && !e.Timestamp.Before(opts.MessageBefore) {
-				return true
-			}
-			s.eligibleCount++
-			role := e.Role
-			if role == "" {
-				// Legacy entries (written before assistant-side capture existed)
-				// have no role field. Normalize to "user" here so downstream
-				// consumers — including any strict `role === 'user'` predicate
-				// in the UI — never have to special-case empty.
-				role = "user"
-			}
-			s.msgs = append(s.msgs, Message{
-				Timestamp:      e.Timestamp,
-				Model:          e.Model,
-				Provider:       e.Provider,
-				Status:         e.Status,
-				Role:           role,
-				Prompt:         e.Prompt,
-				PromptTemplate: e.PromptTemplate,
-			})
-			if len(s.msgs) > opts.MessageLimit {
-				s.msgs = s.msgs[len(s.msgs)-opts.MessageLimit:]
-			}
+		if opts.HeadersOnly {
+			continue
 		}
-		return true
-	}); err != nil {
-		return nil, err
+		if opts.SessionFilter != "" && sid != opts.SessionFilter {
+			continue
+		}
+		if !opts.MessageBefore.IsZero() && !e.Timestamp.Before(opts.MessageBefore) {
+			continue
+		}
+		s.eligibleCount++
+		role := e.Role
+		if role == "" {
+			role = "user"
+		}
+		s.msgs = append(s.msgs, Message{
+			Timestamp:      e.Timestamp,
+			Model:          e.Model,
+			Provider:       e.Provider,
+			Status:         e.Status,
+			Role:           role,
+			Prompt:         e.Prompt,
+			PromptTemplate: e.PromptTemplate,
+			IsSubagent:     isSub,
+			SubagentID:     subID,
+		})
+		if len(s.msgs) > opts.MessageLimit {
+			s.msgs = s.msgs[len(s.msgs)-opts.MessageLimit:]
+		}
 	}
 
 	groups := make([]CWDGroup, 0, len(byCWD))
@@ -657,6 +720,28 @@ func IsHexKeyHash(s string) bool {
 		}
 	}
 	return true
+}
+
+// shortAgentID returns a recognizable prefix of a Claude Code agent id
+// (observed shape: 17-hex). 8 chars is enough to disambiguate concurrent
+// subagent runs in a single session without overwhelming the chip.
+func shortAgentID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+// shortSessionID returns the tail of an opencode session id, dropping the
+// "ses_" prefix when present so the chip shows the meaningful entropy
+// instead of a constant string. Falls back to the head if the id is shorter
+// than expected.
+func shortSessionID(id string) string {
+	s := strings.TrimPrefix(id, "ses_")
+	if len(s) <= 8 {
+		return s
+	}
+	return s[len(s)-8:]
 }
 
 func sortedSetKeys(m map[string]struct{}) []string {

@@ -40,6 +40,22 @@ type Entry struct {
 	SessionID     string `json:"session_id,omitempty"`
 	CWD           string `json:"cwd,omitempty"`
 
+	// Sub-call markers. Both omit when this is a plain parent turn — entries
+	// written before subagent support landed remain byte-identical on disk.
+	// Reader pairs them with the parent (entry whose SessionID equals
+	// AgentID's session, or whose SessionID equals ParentSessionID) to
+	// render the subagent indented under its dispatcher in the UI.
+	//
+	//   - AgentID: Claude Code Task-tool dispatch id (X-Claude-Code-Agent-Id).
+	//     Subagent shares parent's SessionID; AgentID disambiguates which
+	//     dispatched run a given turn belongs to and stays stable across
+	//     every turn of that run (verified against 28-turn batches).
+	//   - ParentSessionID: opencode subagent's pointer to the spawning
+	//     session (X-Parent-Session-Id). Subagent has its own SessionID
+	//     here, distinct from the parent's.
+	AgentID         string `json:"agent_id,omitempty"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+
 	// Prompt is the joined human-readable text for quick grep / dashboarding.
 	// When PromptTemplate is set, Prompt holds only the SUFFIX after the
 	// template prefix; reconstruct the original by concatenating the

@@ -187,3 +187,144 @@ func TestIdentifyClient_AmpBeatsClaudeCodeWhenBothPresent(t *testing.T) {
 		t.Errorf("expected amp to win, got %q", c.Name)
 	}
 }
+
+// Subagent / title-gen detection via identifyRequest. Table-driven so
+// adding a new (client, kind) combo is one row, no extra functions.
+func TestIdentifyRequest_KindDetection(t *testing.T) {
+	cases := []struct {
+		name                string
+		headers             http.Header
+		sysHead             string
+		wantClient          string
+		wantKind            Kind
+		wantAgentID         string
+		wantParentSessionID string
+	}{
+		{
+			name: "claude_code parent",
+			headers: hdr(
+				"User-Agent", "claude-cli/2.1.143 (external, cli)",
+				"X-Claude-Code-Session-Id", "2507c625-b5da-46ad-b93b-9fffe88c3e6b",
+			),
+			sysHead:    "you are claude code, anthropic's official cli for claude.",
+			wantClient: ClientClaudeCode,
+			wantKind:   KindParent,
+		},
+		{
+			name: "claude_code subagent (X-Claude-Code-Agent-Id present)",
+			headers: hdr(
+				"User-Agent", "claude-cli/2.1.143 (external, cli)",
+				"X-Claude-Code-Session-Id", "2507c625-b5da-46ad-b93b-9fffe88c3e6b",
+				"X-Claude-Code-Agent-Id", "a84564f0326e0281b",
+			),
+			// Subagent system prompts also start with the "You are Claude Code"
+			// preamble — but the X-Claude-Code-Agent-Id header takes priority
+			// over any prompt fingerprint, so even when sysHead lies, the
+			// classification stays correct.
+			sysHead:     "you are claude code, anthropic's official cli for claude.",
+			wantClient:  ClientClaudeCode,
+			wantKind:    KindSubagent,
+			wantAgentID: "a84564f0326e0281b",
+		},
+		{
+			name: "claude_code title-gen (sysHead fingerprint)",
+			headers: hdr(
+				"User-Agent", "claude-cli/2.1.143 (external, cli)",
+				"X-Claude-Code-Session-Id", "2507c625-b5da-46ad-b93b-9fffe88c3e6b",
+			),
+			// Real prefix observed in 2026-05-20T102520-f3185b26.log.
+			sysHead:    "generate a concise, sentence-case title (3-7 words)",
+			wantClient: ClientClaudeCode,
+			wantKind:   KindTitleGen,
+		},
+		{
+			name: "opencode parent",
+			headers: hdr(
+				"User-Agent", "opencode/1.15.5 (darwin 25.4.0; arm64) ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+				"Session_id", "ses_1bc967092ffeGtKzXWe1lpywr4",
+			),
+			sysHead:    "you are opencode, you and the user share the same workspace",
+			wantClient: ClientOpencode,
+			wantKind:   KindParent,
+		},
+		{
+			name: "opencode subagent (X-Parent-Session-Id present)",
+			headers: hdr(
+				"User-Agent", "opencode/1.15.5 (darwin 25.4.0; arm64) ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+				"Session_id", "ses_1bc965ecaffeYsbNVmshuHo4aT",
+				"X-Parent-Session-Id", "ses_1bc967092ffeGtKzXWe1lpywr4",
+			),
+			sysHead:             "you are opencode, you and the user share the same workspace",
+			wantClient:          ClientOpencode,
+			wantKind:            KindSubagent,
+			wantParentSessionID: "ses_1bc967092ffeGtKzXWe1lpywr4",
+		},
+		{
+			name: "opencode title-gen (sysHead fingerprint)",
+			headers: hdr(
+				"User-Agent", "opencode/1.15.5 (darwin 25.4.0; arm64) ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+				"Session_id", "ses_1bc967092ffeGtKzXWe1lpywr4",
+			),
+			// Real prefix observed in 2026-05-20T102414-04181a73.log.
+			sysHead:    "you are a title generator. you output only a thread title.",
+			wantClient: ClientOpencode,
+			wantKind:   KindTitleGen,
+		},
+		{
+			name:       "amp has no subagent signal — stays parent",
+			headers:    hdr("User-Agent", "Ap/JS 0.74.0", "X-Amp-Thread-Id", "T-abc"),
+			sysHead:    "",
+			wantClient: ClientAmp,
+			wantKind:   KindParent,
+		},
+		{
+			name:       "curl with no kind hints stays parent",
+			headers:    hdr("User-Agent", "curl/8.7.1"),
+			sysHead:    "",
+			wantClient: ClientCurl,
+			wantKind:   KindParent,
+		},
+		{
+			name:       "unknown ua falls through to parent",
+			headers:    hdr("User-Agent", "MyCustomAgent/1.0"),
+			sysHead:    "",
+			wantClient: ClientUnknown,
+			wantKind:   KindParent,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := identifyRequest(tc.headers, tc.sysHead)
+			if r.Client.Name != tc.wantClient {
+				t.Errorf("client=%q want=%q", r.Client.Name, tc.wantClient)
+			}
+			if r.Kind != tc.wantKind {
+				t.Errorf("kind=%d want=%d", r.Kind, tc.wantKind)
+			}
+			if r.AgentID != tc.wantAgentID {
+				t.Errorf("agent_id=%q want=%q", r.AgentID, tc.wantAgentID)
+			}
+			if r.ParentSessionID != tc.wantParentSessionID {
+				t.Errorf("parent_session_id=%q want=%q", r.ParentSessionID, tc.wantParentSessionID)
+			}
+		})
+	}
+}
+
+// Claude Code subagent header beats title-gen sysHead fingerprint — header
+// is the structural signal, prompt is a fallback. Without this ordering a
+// hypothetical subagent that happens to ALSO generate a title (custom
+// agent that opens with "Generate a concise…") would mis-route to drop.
+func TestIdentifyRequest_AgentIdBeatsTitleGenFingerprint(t *testing.T) {
+	r := identifyRequest(hdr(
+		"User-Agent", "claude-cli/2.1.143 (external, cli)",
+		"X-Claude-Code-Session-Id", "parent-1",
+		"X-Claude-Code-Agent-Id", "agent-deadbeef",
+	), "generate a concise summary of the file")
+	if r.Kind != KindSubagent {
+		t.Fatalf("expected KindSubagent when both signals present, got %d", r.Kind)
+	}
+	if r.AgentID != "agent-deadbeef" {
+		t.Errorf("agent_id=%q", r.AgentID)
+	}
+}

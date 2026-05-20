@@ -120,25 +120,116 @@ func TestMiddleware_SkipsWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestMiddleware_DropsClaudeCodeSubagent(t *testing.T) {
+// Regression: sysHead must only strip the leading "x-anthropic-billing-header"
+// preamble when its marker is actually present. A user-authored system
+// prompt with a blank line in the first paragraph used to lose that
+// paragraph (the early `idx < 512` strip was unconditional). Now the strip
+// is gated on the marker, so a non-Claude-Code prompt with a blank line
+// keeps its full head visible to the detectors.
+func TestSysHead_PreservesParagraphsWithoutBillingHeader(t *testing.T) {
+	sys := "Generate a concise summary of the following.\n\nDo not include personal opinions.\nReturn JSON."
+	got := sysHead(sys, 256)
+	if !strings.HasPrefix(got, "generate a concise summary") {
+		t.Errorf("expected head to start with the user prompt, got %q", got)
+	}
+}
+
+func TestSysHead_StripsClaudeCodeBillingPreamble(t *testing.T) {
+	sys := "x-anthropic-billing-header: cc_version=2.1.143.3a9; cc_entrypoint=cli; cch=88d46;\n\nYou are Claude Code, Anthropic's official CLI for Claude."
+	got := sysHead(sys, 256)
+	if !strings.HasPrefix(got, "you are claude code") {
+		t.Errorf("expected head to start past the billing preamble, got %q", got)
+	}
+}
+
+func TestMiddleware_KeepsClaudeCodeSubagentWithAgentId(t *testing.T) {
 	r, w, dir := newTestRig(t)
 	defer w.Close()
 
-	// Subagent: claude-cli UA, no system block carrying "Primary working
-	// directory:". Parent CLI always sends one — only Task-dispatched
-	// subagents and other internal flows omit it.
-	body := `{"model":"claude","system":"You are a web search agent.","messages":[{"role":"user","content":"Perform a web search for the query: foo"}]}`
+	// Subagent: claude-cli UA + X-Claude-Code-Agent-Id (the unambiguous
+	// header that Claude Code 2.1.143+ sets on every Task-tool dispatch).
+	// Subagent shares parent's session id but has its own agent id. Used
+	// to be dropped to avoid duplicate "(unknown)" UI cards — now kept
+	// and tagged so the reader can render it indented under the parent.
+	body := `{"model":"claude-haiku-4-5","system":"You are an agent for Claude Code","messages":[{"role":"user","content":"Calculate 1+1"}]}`
 	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer alice")
-	req.Header.Set("User-Agent", "claude-cli/2.1.141 (external, cli)")
-	req.Header.Set("X-Claude-Code-Session-Id", "sub-session-1")
+	req.Header.Set("User-Agent", "claude-cli/2.1.143 (external, cli)")
+	req.Header.Set("X-Claude-Code-Session-Id", "parent-session-1")
+	req.Header.Set("X-Claude-Code-Agent-Id", "a84564f0326e0281b")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected subagent request to be kept, got %d entries", len(entries))
+	}
+	if got := entries[0]["agent_id"]; got != "a84564f0326e0281b" {
+		t.Errorf("agent_id=%v want=a84564f0326e0281b", got)
+	}
+	if got := entries[0]["session_id"]; got != "parent-session-1" {
+		t.Errorf("session_id=%v (should be parent's, kept verbatim)", got)
+	}
+}
+
+func TestMiddleware_DropsClaudeCodeTitleGen(t *testing.T) {
+	r, w, dir := newTestRig(t)
+	defer w.Close()
+
+	// Title-gen: Claude Code runs a parallel sub-call per conversation
+	// turn whose system prompt starts with "Generate a concise…". It
+	// has no env block (so cwd would be ""), no X-Claude-Code-Agent-Id,
+	// and would otherwise be indistinguishable from a parent turn with
+	// missing env. The sysHead-based detector catches it.
+	body := `{"model":"claude","system":"Generate a concise, sentence-case title (3-7 words) that captures the main topic of this conversation.","messages":[{"role":"user","content":"<session>do thing</session>"}]}`
+	req, _ := http.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("User-Agent", "claude-cli/2.1.143 (external, cli)")
+	req.Header.Set("X-Claude-Code-Session-Id", "parent-session-1")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 	w.Close()
 
 	if entries := readAllEntries(t, dir); len(entries) != 0 {
-		t.Fatalf("expected subagent request to be dropped, got %d entries", len(entries))
+		t.Fatalf("expected title-gen to be dropped, got %d entries: %+v", len(entries), entries)
+	}
+}
+
+func TestMiddleware_KeepsOpencodeSubagentWithParentId(t *testing.T) {
+	r, w, dir := newTestRig(t)
+	defer w.Close()
+
+	// Opencode 1.15.5+ feature: subagent dispatches carry X-Parent-Session-Id
+	// pointing to the spawning session. Subagent has its own Session_id.
+	// Reader will merge this entry's messages into the parent's session
+	// card; here we just assert the middleware preserves the linkage on
+	// disk. Body is an OpenAI-Responses-shaped request (opencode's path).
+	body := `{"model":"gpt-5.5","input":[` +
+		`{"role":"developer","content":"You are OpenCode, you and the user share the same workspace."},` +
+		`{"role":"user","content":[{"type":"input_text","text":"Calculate 1+1. Return only the numeric answer."}]}` +
+		`]}`
+	req, _ := http.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer alice")
+	req.Header.Set("User-Agent", "opencode/1.15.5 (darwin 25.4.0; arm64) ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14")
+	req.Header.Set("Session_id", "ses_1bc965ecaffeYsbNVmshuHo4aT")
+	req.Header.Set("X-Parent-Session-Id", "ses_1bc967092ffeGtKzXWe1lpywr4")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	w.Close()
+
+	entries := readAllEntries(t, dir)
+	if len(entries) != 1 {
+		t.Fatalf("expected opencode subagent request to be kept, got %d entries", len(entries))
+	}
+	if got := entries[0]["parent_session_id"]; got != "ses_1bc967092ffeGtKzXWe1lpywr4" {
+		t.Errorf("parent_session_id=%v", got)
+	}
+	if got := entries[0]["session_id"]; got != "ses_1bc965ecaffeYsbNVmshuHo4aT" {
+		t.Errorf("session_id=%v (should be subagent's own, not parent's)", got)
 	}
 }
 

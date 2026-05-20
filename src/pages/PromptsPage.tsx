@@ -901,15 +901,33 @@ export function PromptsPage() {
                                         // still get the prominent rail.
                                         const isAssistant = msg.role === 'assistant';
                                         const roleClass = isAssistant ? styles.assistantMsg : styles.userMsg;
+                                        const isSub = msg.is_subagent === true;
+                                        const subID = msg.subagent_id ?? '';
+                                        const rowClass = [
+                                          styles.messageRow,
+                                          roleClass,
+                                          isSub ? styles.subagentMsg : '',
+                                          isSelected ? styles.selectedMsg : '',
+                                        ]
+                                          .filter(Boolean)
+                                          .join(' ');
                                         return (
                                           <button
                                             key={key}
                                             type="button"
-                                            className={`${styles.messageRow} ${roleClass} ${isSelected ? styles.selectedMsg : ''}`}
+                                            className={rowClass}
                                             onClick={() => handleSelectMessage(sess, msg)}
                                           >
                                             <span className={styles.msgTime}>{timeOfDay(msg.ts)}</span>
                                             <span className={styles.msgText}>
+                                              {isSub && (
+                                                <span
+                                                  className={styles.subagentChip}
+                                                  title={`Subagent ${subID || '(no id)'}`}
+                                                >
+                                                  ↳ subagent{subID ? ` · ${subID.slice(0, 6)}` : ''}
+                                                </span>
+                                              )}
                                               {tplHash && (
                                                 <span className={styles.tplChip} title={tpl?.text || `template ${tplHash}`}>
                                                   {tplLabel ? `📋 ${tplLabel}` : `📋 ${tplHash}`}

@@ -710,3 +710,184 @@ func TestBuildDetail_InitialCWDsLazyTrim(t *testing.T) {
 		}
 	}
 }
+
+// Claude Code subagent shares the parent's SessionID and carries an AgentID;
+// the reader's second pass must inherit the parent's CWD so the subagent
+// row lands in the same session card as the dispatching turn — not in a
+// separate "(unknown)" group.
+func TestBuildDetail_LinksClaudeCodeSubagentToParentCWD(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	t0 := time.Date(2026, 5, 20, 10, 25, 27, 0, time.UTC)
+
+	writeJSONL(t, dir, "2026-05-20",
+		Entry{KeyHash: hash, Timestamp: t0, CWD: "/Users/u/proj", SessionID: "sid-parent", Client: ClientClaudeCode, Model: "gpt-5.4-mini", Role: "user", Prompt: "spawn subagent tính 1+1"},
+		Entry{KeyHash: hash, Timestamp: t0.Add(time.Second), SessionID: "sid-parent", AgentID: "a84564f0326e0281b", Client: ClientClaudeCode, Model: "haiku-4-5", Role: "user", Prompt: "Calculate 1+1"},
+		Entry{KeyHash: hash, Timestamp: t0.Add(2 * time.Second), SessionID: "sid-parent", AgentID: "a84564f0326e0281b", Client: ClientClaudeCode, Model: "haiku-4-5", Role: "assistant", Prompt: "2"},
+	)
+
+	d, err := BuildDetail(dir, hash, "sk-a...lice", true, DetailOpts{MessageLimit: 200, SessionLimit: 200, InitialCWDs: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 1 || d.Groups[0].CWD != "/Users/u/proj" {
+		t.Fatalf("expected single group /Users/u/proj, got %+v", d.Groups)
+	}
+	if len(d.Groups[0].Sessions) != 1 || d.Groups[0].Sessions[0].SessionID != "sid-parent" {
+		t.Fatalf("expected single session sid-parent, got %+v", d.Groups[0].Sessions)
+	}
+	msgs := d.Groups[0].Sessions[0].Messages
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages in parent session, got %d", len(msgs))
+	}
+	// First is parent prompt, second is subagent user, third is subagent assistant.
+	if msgs[0].IsSubagent {
+		t.Errorf("parent message marked as subagent")
+	}
+	for i := 1; i < 3; i++ {
+		if !msgs[i].IsSubagent {
+			t.Errorf("msg[%d] missing IsSubagent flag", i)
+		}
+		if msgs[i].SubagentID != "a84564f0" {
+			t.Errorf("msg[%d] SubagentID=%q want a84564f0", i, msgs[i].SubagentID)
+		}
+	}
+}
+
+// Opencode subagent has its OWN SessionID different from the parent. The
+// reader merges its messages into the parent's session card using the
+// ParentSessionID pointer so the conversation reads as one thread.
+func TestBuildDetail_MergesOpencodeSubagentIntoParentSession(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	t0 := time.Date(2026, 5, 20, 10, 24, 16, 0, time.UTC)
+
+	writeJSONL(t, dir, "2026-05-20",
+		Entry{KeyHash: hash, Timestamp: t0, CWD: "/Users/u/proj", SessionID: "ses_AAA", Client: ClientOpencode, Role: "user", Prompt: "spawn subagent tính 1+1"},
+		Entry{KeyHash: hash, Timestamp: t0.Add(5 * time.Second), SessionID: "ses_BBB", ParentSessionID: "ses_AAA", Client: ClientOpencode, Role: "user", Prompt: "Calculate 1+1"},
+	)
+
+	d, err := BuildDetail(dir, hash, "sk-a...lice", true, DetailOpts{MessageLimit: 200, SessionLimit: 200, InitialCWDs: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 1 {
+		t.Fatalf("expected 1 group, got %d: %+v", len(d.Groups), d.Groups)
+	}
+	if len(d.Groups[0].Sessions) != 1 || d.Groups[0].Sessions[0].SessionID != "ses_AAA" {
+		t.Fatalf("expected merge into ses_AAA, got %+v", d.Groups[0].Sessions)
+	}
+	msgs := d.Groups[0].Sessions[0].Messages
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 merged messages, got %d", len(msgs))
+	}
+	if msgs[1].IsSubagent != true {
+		t.Errorf("subagent message not flagged: %+v", msgs[1])
+	}
+	// SubagentID is the tail of the subagent's own session id.
+	if msgs[1].SubagentID == "" {
+		t.Errorf("SubagentID empty on opencode subagent")
+	}
+}
+
+// Orphan subagent (parent rolled out of retention or never present) must
+// not crash the reader. Claude Code orphan looks like a normal entry under
+// "(unknown)"; opencode orphan keeps its own session id and renders as a
+// separate card.
+func TestBuildDetail_OrphanSubagentFallsBackToUnknown(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	t0 := time.Date(2026, 5, 20, 10, 30, 0, 0, time.UTC)
+
+	// Claude Code orphan: subagent shares "sid-missing-parent" but no
+	// parent turn for that session exists.
+	// Opencode orphan: parent_session_id points to "ses_NOPE" which is
+	// not in the scan.
+	writeJSONL(t, dir, "2026-05-20",
+		Entry{KeyHash: hash, Timestamp: t0, SessionID: "sid-missing-parent", AgentID: "agentX", Client: ClientClaudeCode, Role: "user", Prompt: "orphan cc"},
+		Entry{KeyHash: hash, Timestamp: t0.Add(time.Second), SessionID: "ses_BBB", ParentSessionID: "ses_NOPE", Client: ClientOpencode, Role: "user", Prompt: "orphan oc"},
+	)
+
+	d, err := BuildDetail(dir, hash, "sk-a...lice", true, DetailOpts{MessageLimit: 200, SessionLimit: 200, InitialCWDs: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both orphans live under (unknown) since neither has its own CWD.
+	if len(d.Groups) != 1 || d.Groups[0].CWD != "(unknown)" {
+		t.Fatalf("expected 1 (unknown) group, got %+v", d.Groups)
+	}
+	// Two separate session cards (Claude Code shares parent sid; opencode
+	// keeps its own sid), neither flagged as subagent because no parent
+	// resolved.
+	if len(d.Groups[0].Sessions) != 2 {
+		t.Fatalf("expected 2 separate orphan sessions, got %d", len(d.Groups[0].Sessions))
+	}
+	// Pin the bucket session id to the on-disk SessionID for each orphan:
+	// a future refactor that collapses bucketSID to "(no-session)" or to
+	// the parent_session_id would silently lose this guarantee. We need
+	// both orphans to remain individually addressable.
+	gotSIDs := map[string]bool{}
+	for _, s := range d.Groups[0].Sessions {
+		gotSIDs[s.SessionID] = true
+		for _, m := range s.Messages {
+			if m.IsSubagent {
+				t.Errorf("orphan message wrongly flagged as subagent: %+v", m)
+			}
+		}
+	}
+	if !gotSIDs["sid-missing-parent"] {
+		t.Errorf("Claude Code orphan session id not preserved (got %v)", gotSIDs)
+	}
+	if !gotSIDs["ses_BBB"] {
+		t.Errorf("opencode orphan session id not preserved (got %v)", gotSIDs)
+	}
+}
+
+// Regression test for the multi-turn case the oracle flagged: a single
+// subagent dispatch produces dozens of turns (28 verified in production
+// logs), all sharing the same AgentID + parent SessionID. They must all
+// land in the parent session, not 28 separate "(unknown)" cards.
+func TestBuildDetail_LinksMultiTurnSubagentBatch(t *testing.T) {
+	dir := t.TempDir()
+	hash := ratelimit.HashKey("sk-alice")
+	t0 := time.Date(2026, 5, 19, 12, 56, 0, 0, time.UTC)
+
+	es := []Entry{
+		{KeyHash: hash, Timestamp: t0, CWD: "/Users/u/proj", SessionID: "sid-parent", Client: ClientClaudeCode, Role: "user", Prompt: "Spawn a deep Explore"},
+	}
+	for i := 1; i <= 28; i++ {
+		es = append(es, Entry{
+			KeyHash:   hash,
+			Timestamp: t0.Add(time.Duration(i) * time.Second),
+			SessionID: "sid-parent",
+			AgentID:   "af45b4596cffacef7",
+			Client:    ClientClaudeCode,
+			Role:      "user",
+			Prompt:    "subagent turn " + strconv.Itoa(i),
+		})
+	}
+	writeJSONL(t, dir, "2026-05-19", es...)
+
+	d, err := BuildDetail(dir, hash, "sk-a...lice", true, DetailOpts{MessageLimit: 500, SessionLimit: 200, InitialCWDs: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Groups) != 1 || d.Groups[0].CWD != "/Users/u/proj" {
+		t.Fatalf("expected single group /Users/u/proj, got %+v", d.Groups)
+	}
+	if len(d.Groups[0].Sessions) != 1 {
+		t.Fatalf("expected 28 turns to land in ONE session, got %d separate cards", len(d.Groups[0].Sessions))
+	}
+	if got := d.Groups[0].Sessions[0].MessageCount; got != 29 {
+		t.Errorf("MessageCount=%d want 29 (1 parent + 28 subagent)", got)
+	}
+	subFlagged := 0
+	for _, m := range d.Groups[0].Sessions[0].Messages {
+		if m.IsSubagent {
+			subFlagged++
+		}
+	}
+	if subFlagged != 28 {
+		t.Errorf("IsSubagent count=%d want 28", subFlagged)
+	}
+}

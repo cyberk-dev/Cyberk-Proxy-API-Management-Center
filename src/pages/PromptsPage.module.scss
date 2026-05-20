@@ -411,6 +411,19 @@
     .msgTime { opacity: 0.6; }
   }
 
+  // Subagent indent: messages produced inside a Task-tool / child-session
+  // dispatch are nested one step in from the parent's rail so the reader
+  // can see the conversation hand-off at a glance. The border-left
+  // continues the chat-style hierarchy from .userMsg / .assistantMsg
+  // without competing for the role-color signal. Stacks on top of the
+  // role classes — both a user-role subagent row and an assistant-role
+  // subagent row keep their respective accents under the indent.
+  &.subagentMsg {
+    margin-left: $spacing-lg;
+    border-left: 2px dashed var(--border-color);
+    padding-left: $spacing-sm;
+  }
+
   // selectedMsg is declared LAST so source-order specificity (same as
   // role classes, but later wins) lets it override the role-class
   // box-shadow rail and assistant muted background. Without this order
@@ -661,6 +674,22 @@
   border-radius: 4px;
   background: var(--surface-secondary, rgba(127, 127, 127, 0.1));
   color: var(--text-secondary);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  white-space: nowrap;
+}
+
+// Mirrors .tplChip's shape — same monospace, same padding — but tinted
+// with the accent so subagent dispatches stand out from template chips
+// when both appear on the same row. The short id (8 chars) makes
+// concurrent dispatches in one session distinguishable at a glance.
+.subagentChip {
+  display: inline-block;
+  padding: 1px 6px;
+  margin-right: $spacing-xs;
+  border-radius: 4px;
+  background: var(--accent-soft, rgba(99, 102, 241, 0.12));
+  color: var(--accent, #6366f1);
   font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, monospace;
   white-space: nowrap;
