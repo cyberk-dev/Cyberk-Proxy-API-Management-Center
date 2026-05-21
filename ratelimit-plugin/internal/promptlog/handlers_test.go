@@ -28,8 +28,12 @@ func newReadHandlerRig(t *testing.T) (*gin.Engine, string) {
 	proxyCfg.RemoteManagement.SecretKey = "secret"
 	proxyCfg.APIKeys = []string{"sk-x"}
 
+	idx, err := NewIndex(dir)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
 	engine := gin.New()
-	RegisterReadHandlers(engine, proxyCfg, plogCfg, nil)
+	RegisterReadHandlers(engine, proxyCfg, plogCfg, nil, idx)
 	return engine, "secret"
 }
 
@@ -165,8 +169,12 @@ func TestHandler_SearchHappyPath(t *testing.T) {
 	proxyCfg := &config.Config{}
 	proxyCfg.RemoteManagement.SecretKey = secret
 	proxyCfg.APIKeys = []string{"sk-x"}
+	idx, err := NewIndex(dir)
+	if err != nil {
+		t.Fatalf("NewIndex: %v", err)
+	}
 	engine = gin.New()
-	RegisterReadHandlers(engine, proxyCfg, plogCfg, nil)
+	RegisterReadHandlers(engine, proxyCfg, plogCfg, nil, idx)
 
 	rr := doReadGet(engine, "/v0/management/prompts/users/sk-x/search?q=auth", secret)
 	if rr.Code != http.StatusOK {

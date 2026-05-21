@@ -17,7 +17,7 @@ func init() {
 func newTestRig(t *testing.T) (*gin.Engine, *Writer, string) {
 	t.Helper()
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, err := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestMiddleware_LogsAnthropic(t *testing.T) {
 
 func TestMiddleware_CapturesRejectedRequest(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{Enabled: true, Dir: dir, MaxTextBytes: 1024, QueueSize: 16}
 	r := gin.New()
 	r.Use(Middleware(cfg, w))
@@ -102,7 +102,7 @@ func TestMiddleware_SkipsUnknownPaths(t *testing.T) {
 
 func TestMiddleware_SkipsWhenDisabled(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	defer w.Close()
 	cfg := &Config{Enabled: false, Dir: dir}
 	r := gin.New()
@@ -343,7 +343,7 @@ func TestMiddleware_KeepsOpencodeMainChatWithCWD(t *testing.T) {
 
 func TestMiddleware_LogsAssistantResponseAnthropic(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{
 		Enabled:              true,
 		Dir:                  dir,
@@ -403,7 +403,7 @@ func TestMiddleware_AssistantSkipsWhenDisabled(t *testing.T) {
 	// entry — preserves opt-in behavior when callers construct cfg without
 	// going through ParseBytes.
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{Enabled: true, Dir: dir, MaxTextBytes: 1024, QueueSize: 16}
 	r := gin.New()
 	r.Use(Middleware(cfg, w))
@@ -432,7 +432,7 @@ func TestMiddleware_AssistantSkipsOnErrorStatus(t *testing.T) {
 	// 4xx/5xx responses have no useful assistant content — skip the second
 	// entry even when LogAssistantResponse is on.
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{
 		Enabled:              true,
 		Dir:                  dir,
@@ -473,7 +473,7 @@ func TestMiddleware_AssistantSkipsOnErrorStatus(t *testing.T) {
 
 func TestMiddleware_AssistantCapturedOnAnthropicToolLoop(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{
 		Enabled:              true,
 		Dir:                  dir,
@@ -529,7 +529,7 @@ func TestMiddleware_AssistantCapturedOnAnthropicSSEToolLoop(t *testing.T) {
 	// minimal Anthropic stream (one text block) so parseAnthropicSSE has
 	// to assemble it.
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{
 		Enabled:              true,
 		Dir:                  dir,
@@ -584,7 +584,7 @@ func TestMiddleware_AssistantCapturedOnAnthropicSSEToolLoop(t *testing.T) {
 
 func TestMiddleware_AssistantCapturedOnOpenAIChatToolLoop(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{
 		Enabled:              true,
 		Dir:                  dir,
@@ -635,7 +635,7 @@ func TestMiddleware_AssistantCapturedOnOpenAIChatToolLoop(t *testing.T) {
 
 func TestMiddleware_AssistantCapturedOnOpenAIResponsesToolLoop(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{
 		Enabled:              true,
 		Dir:                  dir,
@@ -691,7 +691,7 @@ func TestMiddleware_AssistantCapturedOnOpenAIResponsesToolLoop(t *testing.T) {
 
 func TestMiddleware_AssistantCapturedOnGeminiToolLoop(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{})
+	w, _ := NewWriter(dir, 16, nil, TemplatesConfig{}, nil)
 	cfg := &Config{
 		Enabled:              true,
 		Dir:                  dir,

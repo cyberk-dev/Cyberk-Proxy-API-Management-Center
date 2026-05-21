@@ -22,6 +22,46 @@ import (
 // one corrupt entry doesn't abort the whole report.
 type scanCallback func(Entry) bool
 
+// parentRef holds the render-time (cwd, sid) bucket a subagent should merge
+// into. Materialized by callers walking entries for one key — the absence of
+// a parent for a flagged subagent entry is what marks it as orphan.
+type parentRef struct {
+	cwd string
+	sid string
+}
+
+// bucketFor resolves an entry's render-time bucket. Three outcomes:
+//   - Plain user/assistant turn (no subagent markers): bucket is the entry's own
+//     (cwd, sid). isSub=false, isOrphan=false.
+//   - Subagent with a known parent (Claude Code shares SessionID; opencode uses
+//     ParentSessionID → parent's SessionID): bucket inherits from parent so the
+//     subagent renders inside the parent's session card. isSub=true.
+//   - Subagent whose parent rolled out of retention: isOrphan=true. Callers
+//     drop these — rendering them standalone surfaces dispatcher framing
+//     ("Spawn a subagent to…") with no human context, which is pure noise.
+//
+// The on-disk Entry is never rewritten; this is a pure read-side decision so
+// a later scan with the parent back in scope can re-link the same entry.
+func bucketFor(e Entry, parents map[string]parentRef) (cwd, sid string, isSub bool, subID string, isOrphan bool) {
+	cwd, sid = e.CWD, e.SessionID
+	switch {
+	case e.AgentID != "" && e.SessionID != "":
+		if p, ok := parents[e.SessionID]; ok {
+			cwd = p.cwd
+			isSub, subID = true, shortAgentID(e.AgentID)
+		}
+	case e.ParentSessionID != "":
+		if p, ok := parents[e.ParentSessionID]; ok {
+			cwd, sid = p.cwd, p.sid
+			isSub, subID = true, shortSessionID(e.SessionID)
+		}
+	}
+	if (e.AgentID != "" || e.ParentSessionID != "") && !isSub {
+		isOrphan = true
+	}
+	return
+}
+
 // scanAll walks every prompts-YYYY-MM-DD.jsonl in dir in chronological order
 // (oldest file first, lines within a file in append order). A missing dir is
 // not an error — it just means no data has been written yet.
@@ -110,7 +150,28 @@ type UserSummary struct {
 // configured keys that have no activity yet, so the UI can offer the full
 // roster even on a fresh install. Sort order: last-seen descending, with
 // configured-but-empty keys at the bottom.
+//
+// Reads disk on every call; the in-memory Index serves the same shape via
+// Index.ListUsers without a scan. This top-level function stays so the
+// equivalence test (index_test.go) can run both paths against the same
+// fixtures.
 func ListUsers(dir string, configuredKeys []string) ([]UserSummary, error) {
+	perKey := map[string][]Entry{}
+	if err := scanAll(dir, func(e Entry) bool {
+		perKey[e.KeyHash] = append(perKey[e.KeyHash], e)
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	return aggregateUsers(perKey, configuredKeys), nil
+}
+
+// aggregateUsers is the pure-data aggregation shared by the scan-based
+// ListUsers and the in-memory Index.ListUsers. perKey maps key_hash to that
+// key's entries in chronological-insertion order. Configured keys with zero
+// activity are unioned in at the tail so brand-new keys still surface in
+// the UI.
+func aggregateUsers(perKey map[string][]Entry, configuredKeys []string) []UserSummary {
 	type agg struct {
 		msgCount  int
 		sessions  map[string]struct{}
@@ -122,41 +183,40 @@ func ListUsers(dir string, configuredKeys []string) ([]UserSummary, error) {
 	}
 	byHash := map[string]*agg{}
 
-	if err := scanAll(dir, func(e Entry) bool {
-		a := byHash[e.KeyHash]
-		if a == nil {
-			a = &agg{
-				sessions:  make(map[string]struct{}),
-				cwds:      make(map[string]struct{}),
-				clients:   make(map[string]struct{}),
-				models:    make(map[string]struct{}),
-				firstSeen: e.Timestamp,
-				lastSeen:  e.Timestamp,
+	for hash, entries := range perKey {
+		for _, e := range entries {
+			a := byHash[hash]
+			if a == nil {
+				a = &agg{
+					sessions:  make(map[string]struct{}),
+					cwds:      make(map[string]struct{}),
+					clients:   make(map[string]struct{}),
+					models:    make(map[string]struct{}),
+					firstSeen: e.Timestamp,
+					lastSeen:  e.Timestamp,
+				}
+				byHash[hash] = a
 			}
-			byHash[e.KeyHash] = a
+			a.msgCount++
+			if e.SessionID != "" {
+				a.sessions[e.SessionID] = struct{}{}
+			}
+			if e.CWD != "" {
+				a.cwds[e.CWD] = struct{}{}
+			}
+			if e.Client != "" {
+				a.clients[e.Client] = struct{}{}
+			}
+			if e.Model != "" {
+				a.models[e.Model] = struct{}{}
+			}
+			if e.Timestamp.After(a.lastSeen) {
+				a.lastSeen = e.Timestamp
+			}
+			if e.Timestamp.Before(a.firstSeen) {
+				a.firstSeen = e.Timestamp
+			}
 		}
-		a.msgCount++
-		if e.SessionID != "" {
-			a.sessions[e.SessionID] = struct{}{}
-		}
-		if e.CWD != "" {
-			a.cwds[e.CWD] = struct{}{}
-		}
-		if e.Client != "" {
-			a.clients[e.Client] = struct{}{}
-		}
-		if e.Model != "" {
-			a.models[e.Model] = struct{}{}
-		}
-		if e.Timestamp.After(a.lastSeen) {
-			a.lastSeen = e.Timestamp
-		}
-		if e.Timestamp.Before(a.firstSeen) {
-			a.firstSeen = e.Timestamp
-		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 
 	hintByHash := map[string]string{}
@@ -180,9 +240,6 @@ func ListUsers(dir string, configuredKeys []string) ([]UserSummary, error) {
 			Models:       sortedSetKeys(a.models),
 		})
 	}
-	// Configured keys with zero activity still belong in the list — without
-	// them the UI would hide brand-new keys and look suspicious on a fresh
-	// install.
 	for _, k := range configuredKeys {
 		hash := ratelimit.HashKey(k)
 		if _, ok := byHash[hash]; ok {
@@ -192,8 +249,6 @@ func ListUsers(dir string, configuredKeys []string) ([]UserSummary, error) {
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
-		// Active users (any message) first, by last_seen desc; empty configured
-		// keys fall to the bottom in stable order.
 		if out[i].MessageCount == 0 && out[j].MessageCount == 0 {
 			return out[i].KeyHash < out[j].KeyHash
 		}
@@ -205,7 +260,7 @@ func ListUsers(dir string, configuredKeys []string) ([]UserSummary, error) {
 		}
 		return out[i].LastSeen.After(out[j].LastSeen)
 	})
-	return out, nil
+	return out
 }
 
 // Detail is the per-user tree returned by /users/:key. Groups are sorted by
@@ -417,7 +472,33 @@ func InlineTemplates(detail *Detail, templates *TemplateStore) {
 //
 // Empty Sessions is always `[]Session{}`, never nil, so JSON marshals it
 // as `[]` (not `null`) and TS callers can rely on `.length`.
+//
+// Reads disk on every call. Index.BuildDetail serves the same shape from
+// RAM; this top-level function stays so the equivalence test
+// (index_test.go) can run both paths against the same fixtures.
 func BuildDetail(dir, keyHash string, configuredHint string, configured bool, opts DetailOpts) (*Detail, error) {
+	entries := make([]Entry, 0, 256)
+	if err := scanAll(dir, func(e Entry) bool {
+		if e.KeyHash != keyHash {
+			return true
+		}
+		// Blocks is the heavy field (image metadata, tool refs, base64
+		// fingerprints) and the tree response never includes it. Drop
+		// before materializing.
+		e.Blocks = nil
+		entries = append(entries, e)
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	return aggregateDetail(entries, keyHash, configuredHint, configured, opts), nil
+}
+
+// aggregateDetail is the pure aggregation step shared by the scan-based
+// BuildDetail and Index.BuildDetail. entries is the chronological-insertion-
+// ordered slice of Entries for one key; this function derives the parent
+// session map from them, then runs the bucket/window/pagination pipeline.
+func aggregateDetail(entries []Entry, keyHash, configuredHint string, configured bool, opts DetailOpts) *Detail {
 	if opts.MessageLimit <= 0 {
 		opts.MessageLimit = 200
 	}
@@ -461,86 +542,25 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 	totalSessions := map[string]struct{}{}
 	totalMessages := 0
 
-	// Two-pass scan to support subagent → parent linking. Pass 1
-	// materializes every entry for this key into a flat slice AND records
-	// the (cwd, session_id) of each parent turn into parentBySession. A
-	// "parent turn" is any entry that has no subagent markers (AgentID /
-	// ParentSessionID both empty) and a non-empty CWD — i.e. the kind of
-	// entry that originates a real session card. Pass 2 walks the slice
-	// and routes each entry to its render bucket: subagents inherit their
-	// parent's (cwd, session_id) when found, falling back to the entry's
-	// own CWD ("(unknown)" if empty) otherwise.
-	//
-	// Memory cost is one []Entry per key, bounded by retention window —
-	// well within the existing per-session aggregates this function
-	// already builds in memory. On-disk SessionID / CWD are never
-	// rewritten; linking is purely a render-time decision so a later
-	// scan can re-render differently if needed.
-	type parentRef struct {
-		cwd string
-		sid string
-	}
+	// Derive parent-session map. Last-writer-wins is fine: multiple parent
+	// turns in the same session must agree on CWD (the env block doesn't
+	// change mid-session), so the final stored value is just the most
+	// recent observation. Entries must be in chronological order for the
+	// "last" to be deterministic — both callers preserve that ordering.
 	parentBySession := map[string]parentRef{}
-	entries := make([]Entry, 0, 256)
-	if err := scanAll(dir, func(e Entry) bool {
-		if e.KeyHash != keyHash {
-			return true
-		}
-		// Blocks is the heavy field (image metadata, tool refs, base64
-		// fingerprints) and the tree response never includes it — the
-		// per-message detail endpoint fetches it lazily on click. Drop
-		// before materializing so pass 1's []Entry stays roughly the
-		// same memory footprint as the existing per-session aggregates.
-		e.Blocks = nil
-		entries = append(entries, e)
+	for _, e := range entries {
 		if e.AgentID == "" && e.ParentSessionID == "" && e.CWD != "" && e.SessionID != "" {
-			// Last-writer-wins is fine: multiple parent turns in the same
-			// session must agree on CWD (the env block doesn't change
-			// mid-session), so the final stored value is just the most
-			// recent observation.
 			parentBySession[e.SessionID] = parentRef{cwd: e.CWD, sid: e.SessionID}
 		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 
 	for _, e := range entries {
 		// Bucket decision: resolve subagent → parent, else passthrough.
 		// Raw e.CWD / e.SessionID stay untouched on disk — bucketCWD /
-		// bucketSID are the render-time keys only.
-		bucketCWD, bucketSID := e.CWD, e.SessionID
-		isSub, subID := false, ""
-		switch {
-		case e.AgentID != "" && e.SessionID != "":
-			// Claude Code subagent: shares parent's SessionID. Look up
-			// the parent's CWD; on miss (orphan — parent rolled out of
-			// retention) fall through with the entry's own CWD, which
-			// will normalize to "(unknown)" below since subagent
-			// dispatches typically have no env block.
-			if p, ok := parentBySession[e.SessionID]; ok {
-				bucketCWD = p.cwd
-				isSub, subID = true, shortAgentID(e.AgentID)
-			}
-		case e.ParentSessionID != "":
-			// opencode subagent: parent_session_id points to the
-			// spawning session, which has a different SessionID. Merge
-			// the subagent's messages into the parent's session card
-			// when the parent is found; otherwise it's an orphan and
-			// gets dropped below.
-			if p, ok := parentBySession[e.ParentSessionID]; ok {
-				bucketCWD, bucketSID = p.cwd, p.sid
-				isSub, subID = true, shortSessionID(e.SessionID)
-			}
-		}
-
-		// Orphan subagent drop: entry carries subagent markers but the
-		// parent isn't in retention. Rendering it as a standalone card
-		// surfaces dispatcher framing ("Spawn a subagent to…", "CRITICAL:
-		// Respond with TEXT ONLY…") with no human context — pure noise.
-		// The on-disk entry is untouched so a later scan can re-link if
-		// the parent comes back into the window.
-		if (e.AgentID != "" || e.ParentSessionID != "") && !isSub {
+		// bucketSID are the render-time keys only. See bucketFor for the
+		// full decision table including orphan-subagent semantics.
+		bucketCWD, bucketSID, isSub, subID, isOrphan := bucketFor(e, parentBySession)
+		if isOrphan {
 			continue
 		}
 
@@ -734,7 +754,7 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 		TotalSessions: len(totalSessions),
 		TotalCWDs:     len(byCWD),
 		Groups:        groups,
-	}, nil
+	}
 }
 
 // SearchMessages does a case-insensitive substring scan over Message.Prompt
@@ -754,9 +774,31 @@ func BuildDetail(dir, keyHash string, configuredHint string, configured bool, op
 // query that would only match inside the template prefix won't hit. Wire
 // the TemplateStore in here later if that gap matters.
 func SearchMessages(dir, keyHash, query string, limit int) (*SearchResult, error) {
+	if strings.TrimSpace(query) == "" {
+		return &SearchResult{Matches: []SearchHit{}}, nil
+	}
+	entries := make([]Entry, 0, 256)
+	if err := scanAll(dir, func(e Entry) bool {
+		if e.KeyHash != keyHash {
+			return true
+		}
+		e.Blocks = nil
+		entries = append(entries, e)
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	return aggregateSearch(entries, query, limit), nil
+}
+
+// aggregateSearch is the pure search step shared by the scan-based
+// SearchMessages and Index.SearchMessages. Empty/whitespace query returns
+// an empty result (callers normally pre-validate, but the guard here keeps
+// the function safe to call directly).
+func aggregateSearch(entries []Entry, query string, limit int) *SearchResult {
 	q := strings.TrimSpace(query)
 	if q == "" {
-		return &SearchResult{Matches: []SearchHit{}}, nil
+		return &SearchResult{Matches: []SearchHit{}}
 	}
 	if limit <= 0 {
 		limit = 200
@@ -768,30 +810,13 @@ func SearchMessages(dir, keyHash, query string, limit int) (*SearchResult, error
 	// path only allocates the haystack lowercase.
 	lowQuery := []rune(strings.ToLower(q))
 
-	// Pass 1: materialize this key's entries + parent map. Identical
-	// pattern to BuildDetail — the duplication is deliberate: extracting a
-	// shared helper risks regressing BuildDetail's well-tested behavior for
-	// a per-PR1 feature. Consolidate later if a third caller needs it.
-	type parentRef struct {
-		cwd string
-		sid string
-	}
+	// Derive parent map from entries; same chronological-order assumption
+	// as aggregateDetail.
 	parentBySession := map[string]parentRef{}
-	entries := make([]Entry, 0, 256)
-	if err := scanAll(dir, func(e Entry) bool {
-		if e.KeyHash != keyHash {
-			return true
-		}
-		// Blocks are dropped to keep memory bounded — search hits don't
-		// surface block content (PR1 scope is prompt text only).
-		e.Blocks = nil
-		entries = append(entries, e)
+	for _, e := range entries {
 		if e.AgentID == "" && e.ParentSessionID == "" && e.CWD != "" && e.SessionID != "" {
 			parentBySession[e.SessionID] = parentRef{cwd: e.CWD, sid: e.SessionID}
 		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 
 	hits := make([]SearchHit, 0, 64)
@@ -799,23 +824,8 @@ func SearchMessages(dir, keyHash, query string, limit int) (*SearchResult, error
 		if e.Prompt == "" {
 			continue
 		}
-		// Bucket decision: same switch as BuildDetail.
-		bucketCWD, bucketSID := e.CWD, e.SessionID
-		isSub, subID := false, ""
-		switch {
-		case e.AgentID != "" && e.SessionID != "":
-			if p, ok := parentBySession[e.SessionID]; ok {
-				bucketCWD = p.cwd
-				isSub, subID = true, shortAgentID(e.AgentID)
-			}
-		case e.ParentSessionID != "":
-			if p, ok := parentBySession[e.ParentSessionID]; ok {
-				bucketCWD, bucketSID = p.cwd, p.sid
-				isSub, subID = true, shortSessionID(e.SessionID)
-			}
-		}
-		// Orphan subagent drop — same reasoning as BuildDetail.
-		if (e.AgentID != "" || e.ParentSessionID != "") && !isSub {
+		bucketCWD, bucketSID, isSub, subID, isOrphan := bucketFor(e, parentBySession)
+		if isOrphan {
 			continue
 		}
 
@@ -856,7 +866,7 @@ func SearchMessages(dir, keyHash, query string, limit int) (*SearchResult, error
 		Matches:      hits,
 		TotalMatches: total,
 		Truncated:    truncated,
-	}, nil
+	}
 }
 
 // buildExcerpt returns a ±window-rune slice of prompt around the first

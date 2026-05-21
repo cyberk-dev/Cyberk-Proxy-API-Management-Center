@@ -12,7 +12,7 @@ import (
 
 func TestWriter_WritesJSONL(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})
+	w, err := NewWriter(dir, 8, nil, TemplatesConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestWriter_WritesJSONL(t *testing.T) {
 
 func TestWriter_RotatesByDate(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})
+	w, err := NewWriter(dir, 8, nil, TemplatesConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestWriter_RotatesByDate(t *testing.T) {
 func TestWriter_DropsOnFullQueue(t *testing.T) {
 	dir := t.TempDir()
 	// Tiny queue + we never let the goroutine drain by submitting fast.
-	w, err := NewWriter(dir, 1, nil, TemplatesConfig{})
+	w, err := NewWriter(dir, 1, nil, TemplatesConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestWriter_DropsOnFullQueue(t *testing.T) {
 }
 
 func TestWriter_RejectsEmptyDir(t *testing.T) {
-	if _, err := NewWriter("", 8, nil, TemplatesConfig{}); err == nil {
+	if _, err := NewWriter("", 8, nil, TemplatesConfig{}, nil); err == nil {
 		t.Fatal("expected error for empty dir")
 	}
 }
@@ -94,7 +94,7 @@ func TestWriter_StripsBlockTextBeforeEncode(t *testing.T) {
 	// JSONL line carries the content once (in `prompt`). Block.Bytes
 	// preserves the per-block size for offline reconstruction of structure.
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})
+	w, err := NewWriter(dir, 8, nil, TemplatesConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestWriter_SkipsTemplatingForAssistantEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := NewWriter(dir, 8, tpl, TemplatesConfig{Enabled: true})
+	w, err := NewWriter(dir, 8, tpl, TemplatesConfig{Enabled: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestWriter_SkipsTemplatingForAssistantEntries(t *testing.T) {
 
 func TestWriter_SubmitAfterClose(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewWriter(dir, 8, nil, TemplatesConfig{})
+	w, err := NewWriter(dir, 8, nil, TemplatesConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

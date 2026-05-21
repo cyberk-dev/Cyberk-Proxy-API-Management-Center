@@ -85,6 +85,11 @@ type Writer struct {
 	wg        sync.WaitGroup
 	templates *TemplateStore
 	detector  *templateDetector
+	// index is the in-memory derived view that read handlers query. The
+	// writer pushes each entry into it after the JSONL write succeeds
+	// (writer.run). A nil index disables this — useful in writer-only tests
+	// where the index isn't relevant.
+	index *Index
 
 	dropped atomic.Uint64
 
@@ -99,7 +104,11 @@ type Writer struct {
 //
 // templates may be nil to disable prompt-templating. When non-nil, the
 // writer also seeds and runs a templateDetector with cfg.Templates.
-func NewWriter(dir string, queueSize int, templates *TemplateStore, cfg TemplatesConfig) (*Writer, error) {
+//
+// index may be nil; when non-nil, every successful disk write also pushes
+// the post-template, blocks-stripped Entry into the index so read handlers
+// see the new entry immediately without re-scanning disk.
+func NewWriter(dir string, queueSize int, templates *TemplateStore, cfg TemplatesConfig, index *Index) (*Writer, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("promptlog: empty dir")
 	}
@@ -113,6 +122,7 @@ func NewWriter(dir string, queueSize int, templates *TemplateStore, cfg Template
 		dir:       dir,
 		ch:        make(chan *Entry, queueSize),
 		templates: templates,
+		index:     index,
 	}
 	if templates != nil && cfg.Enabled {
 		w.detector = newTemplateDetector(templates, cfg)
@@ -291,7 +301,26 @@ func (w *Writer) run() {
 			}
 			if err := buf.WriteByte('\n'); err != nil {
 				log.Warnf("promptlog: write: %v", err)
+				continue
 			}
+			// Push to the in-memory index AFTER both bytes hit the userspace
+			// buffer. Order matters: if the buf.Write or buf.WriteByte above
+			// fails (disk full, ENOSPC, EISDIR on a sabotaged path), the
+			// `continue` skips this line — the index stays consistent with
+			// what reached disk. Moving this line above the writes would
+			// publish phantom entries the file never received.
+			// Enforcement: TestWriter_DoesNotAddOnDiskFailure in
+			// index_test.go gates this invariant; do not move it.
+			//
+			// Partial-write divergence: if buf.Write succeeds but
+			// buf.WriteByte('\n') fails, the file holds a malformed line
+			// without a newline. scanFile drops malformed lines at boot
+			// (reader.go: "skip malformed line"), so the in-RAM index
+			// (which got no Add) and the rebuilt-from-disk index agree —
+			// both omit the entry. Readers can briefly see entries that
+			// vanish on the next process restart, but only when the disk
+			// write itself failed; the entry was never going to be durable.
+			w.index.Add(e)
 		case <-flushTicker.C:
 			if buf != nil {
 				if err := buf.Flush(); err != nil {

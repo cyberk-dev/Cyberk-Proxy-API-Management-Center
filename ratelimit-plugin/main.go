@@ -103,13 +103,24 @@ func main() {
 	}
 	var plogWriter *promptlog.Writer
 	var plogTemplates *promptlog.TemplateStore
+	var plogIndex *promptlog.Index
 	if plogCfg.IsEnabled() {
 		plogTemplates, err = promptlog.NewTemplateStore(plogCfg.Dir)
 		if err != nil {
 			log.Warnf("promptlog: templates init failed, disabled: %v", err)
 			plogTemplates = nil
 		}
-		plogWriter, err = promptlog.NewWriter(plogCfg.Dir, plogCfg.QueueSize, plogTemplates, plogCfg.Templates)
+		// Cold-start scan: rebuilds the in-memory index from every
+		// prompts-*.jsonl file. Logs files/entries/dur so operators can
+		// spot regressions. On error we degrade gracefully — nil index
+		// makes the read handlers fall back to scan-on-read (slower but
+		// still correct).
+		plogIndex, err = promptlog.NewIndex(plogCfg.Dir)
+		if err != nil {
+			log.Warnf("promptlog: index init failed (read path will scan disk): %v", err)
+			plogIndex = nil
+		}
+		plogWriter, err = promptlog.NewWriter(plogCfg.Dir, plogCfg.QueueSize, plogTemplates, plogCfg.Templates, plogIndex)
 		if err != nil {
 			log.Warnf("promptlog: writer init failed, disabled: %v", err)
 			plogCfg = &promptlog.Config{}
@@ -234,7 +245,7 @@ func main() {
 			api.WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, c *config.Config) {
 				usagepush.Register(engine, c)
 				usagestore.RegisterRoutes(engine, c, ustore, rlBridge{store})
-				promptlog.RegisterReadHandlers(engine, c, plogCfg, plogTemplates)
+				promptlog.RegisterReadHandlers(engine, c, plogCfg, plogTemplates, plogIndex)
 			}),
 		)
 

@@ -18,7 +18,17 @@ import (
 // /v0/management/prompts/*. Auth mirrors usagestore's management-key
 // middleware so operators only configure one secret. templates may be nil
 // (templating disabled) — in that case the templates endpoints return 503.
-func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *Config, templates *TemplateStore) {
+//
+// idx is the in-memory index that serves every read. Nil idx falls back to
+// the scan-based ListUsers/BuildDetail/SearchMessages path — useful in
+// tests that don't bother building an Index, and as a graceful-degrade
+// path if NewIndex fails at boot.
+//
+// TODO(promptlog): drop the `idx == nil` scan fallback after the index has
+// proven itself in production for a release cycle. The fallback hides the
+// risk that a future feature added only to the index path silently bypasses
+// the scan branch — see oracle review item #10 in atomic-booping-patterson.
+func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *Config, templates *TemplateStore, idx *Index) {
 	if plogCfg == nil || !plogCfg.IsEnabled() {
 		// Endpoints are registered anyway so the UI gets a clean 503 instead
 		// of 404 — easier to detect "feature off" vs "wrong URL".
@@ -32,10 +42,16 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 	auth := makeAuthMiddleware(proxyCfg)
 
 	engine.GET("/v0/management/prompts/users", auth, func(c *gin.Context) {
-		users, err := ListUsers(plogCfg.Dir, configuredKeys(proxyCfg))
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+		var users []UserSummary
+		if idx != nil {
+			users = idx.ListUsers(configuredKeys(proxyCfg))
+		} else {
+			var err error
+			users, err = ListUsers(plogCfg.Dir, configuredKeys(proxyCfg))
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{"users": users})
 	})
@@ -186,10 +202,16 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 			opts.SessionBefore = &SessionCursor{Ts: ts, Sid: parts[1]}
 		}
 
-		detail, err := BuildDetail(plogCfg.Dir, keyHash, hint, configured, opts)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+		var detail *Detail
+		if idx != nil {
+			detail = idx.BuildDetail(keyHash, hint, configured, opts)
+		} else {
+			var err error
+			detail, err = BuildDetail(plogCfg.Dir, keyHash, hint, configured, opts)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
 		}
 		if c.Query("inline_templates") == "1" {
 			InlineTemplates(detail, templates)
@@ -235,10 +257,16 @@ func RegisterReadHandlers(engine *gin.Engine, proxyCfg *config.Config, plogCfg *
 			}
 		}
 
-		res, err := SearchMessages(plogCfg.Dir, keyHash, q, limit)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+		var res *SearchResult
+		if idx != nil {
+			res = idx.SearchMessages(keyHash, q, limit)
+		} else {
+			var err error
+			res, err = SearchMessages(plogCfg.Dir, keyHash, q, limit)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
 		}
 		c.JSON(http.StatusOK, res)
 	})
