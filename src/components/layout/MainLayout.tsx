@@ -390,7 +390,19 @@ export function MainLayout() {
   }, [fetchConfig]);
 
   const extensionItems = extensionNavItems(t);
-  const navGroups = [
+  type NavItem = {
+    path: string;
+    icon?: ReactNode;
+    labelKey?: string;
+    metaKey?: string;
+    label?: string;
+  };
+  type NavGroup = {
+    id: string;
+    labelKey: string;
+    items: NavItem[];
+  };
+  const navGroups: NavGroup[] = [
     {
       id: 'operate',
       labelKey: 'nav_groups.operate',

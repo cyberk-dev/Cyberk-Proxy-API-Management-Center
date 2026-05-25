@@ -668,7 +668,6 @@ export function PromptsPage() {
     const q = deferredQuery.trim();
     if (!selectedKey || q.length < SEARCH_MIN_CHARS) return;
     const seq = ++searchSeqRef.current;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- visible spinner during async fetch
     setSearchLoading(true);
     promptsApi
       .searchMessages(selectedKey, q, SEARCH_LIMIT)
