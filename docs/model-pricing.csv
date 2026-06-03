@@ -9,6 +9,7 @@ gpt-5.3-codex-spark,,,,"KHÔNG có API công khai. Research preview chỉ cho Ch
 claude-haiku-4-5-20251001,1.00,0.10,5.00,"Cache 5m write: $1.25. Cache 1h write: $2.",platform.claude.com/docs/en/about-claude/pricing
 claude-sonnet-4-6,3.00,0.30,15.00,"Cache 5m write: $3.75. Cache 1h write: $6. 1M ctx flat.",platform.claude.com/docs/en/about-claude/pricing
 claude-sonnet-4-5,3.00,0.30,15.00,"Cache 5m write: $3.75. Cache 1h write: $6.",platform.claude.com/docs/en/about-claude/pricing
+claude-opus-4-8,5.00,0.50,25.00,"Same rate card từ 4.5. Fast mode: $10/$50 (rẻ ~3x so 4.7). US-only +10%. Tokenizer giữ nguyên như 4.7 (+35% tokens vs 4.6).",platform.claude.com/docs/en/about-claude/pricing
 claude-opus-4-7,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10. New tokenizer có thể dùng +35% tokens/same text.",platform.claude.com/docs/en/about-claude/pricing
 claude-opus-4-6,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10. Fast mode: $30/$150.",platform.claude.com/docs/en/about-claude/pricing
 claude-opus-4-5,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10.",platform.claude.com/docs/en/about-claude/pricing
@@ -22,3 +23,6 @@ glm-5,1.00,0.20,3.20,"Z.ai official. Cached Input Storage: Limited-time Free.",d
 glm-5.1,1.40,0.26,4.40,"Z.ai official. Cached Input Storage: Limited-time Free.",docs.z.ai/guides/overview/pricing
 MiniMax-M2.5,0.30,0.03,1.20,"Official MiniMax paygo. Cache write: $0.375. Highspeed variant: $0.6/$2.4.",platform.minimax.io/docs/guides/pricing-paygo
 MiniMax-M2.7,0.30,0.06,1.20,"Official MiniMax paygo. Cache write: $0.375. Highspeed variant: $0.6/$2.4.",platform.minimax.io/docs/guides/pricing-paygo
+MiniMax-M3,0.60,0.12,2.40,"Launched 1/6/2026. Paygo standard (<=512K). Launch promo tuần đầu: $0.30/$0.06/$1.20. >512K = tier 2x. Cache write free.",platform.minimax.io/docs/guides/pricing-paygo
+deepseek-v4-flash,0.14,0.0028,0.28,"Official DeepSeek API. 1M ctx, 384K max output. Cache hit giảm 98% input. Alias deepseek-chat/reasoner deprecate 2026-07-24.",api-docs.deepseek.com/quick_start/pricing
+deepseek-v4-pro,0.435,0.003625,0.87,"Official DeepSeek API sau promo (= 1/4 giá gốc $1.74 in/$3.48 out). 1M ctx, 384K max output.",api-docs.deepseek.com/quick_start/pricing

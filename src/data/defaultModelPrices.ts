@@ -4,7 +4,7 @@ export interface ModelPrice {
   cache: number;
 }
 
-// Prices in USD per 1M tokens. Source: docs/model-pricing.csv (2026-04-24).
+// Prices in USD per 1M tokens. Source: docs/model-pricing.csv (2026-06-03).
 // Keep `completion` (output) and `cache` (cache read) aligned with how
 // `calculateCost` splits tokens: prompt × (input - cached) + cache × cached +
 // completion × output.
@@ -22,6 +22,7 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrice> = {
   'claude-haiku-4-5-20251001': { prompt: 1.0, completion: 5.0, cache: 0.1 },
   'claude-sonnet-4-6': { prompt: 3.0, completion: 15.0, cache: 0.3 },
   'claude-sonnet-4-5': { prompt: 3.0, completion: 15.0, cache: 0.3 },
+  'claude-opus-4-8': { prompt: 5.0, completion: 25.0, cache: 0.5 },
   'claude-opus-4-7': { prompt: 5.0, completion: 25.0, cache: 0.5 },
   'claude-opus-4-6': { prompt: 5.0, completion: 25.0, cache: 0.5 },
   'claude-opus-4-5': { prompt: 5.0, completion: 25.0, cache: 0.5 },
@@ -38,7 +39,11 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrice> = {
   'glm-5.1': { prompt: 1.4, completion: 4.4, cache: 0.26 },
 
   'MiniMax-M2.5': { prompt: 0.3, completion: 1.2, cache: 0.03 },
-  'MiniMax-M2.7': { prompt: 0.3, completion: 1.2, cache: 0.06 }
+  'MiniMax-M2.7': { prompt: 0.3, completion: 1.2, cache: 0.06 },
+  'MiniMax-M3': { prompt: 0.6, completion: 2.4, cache: 0.12 },
+
+  'deepseek-v4-flash': { prompt: 0.14, completion: 0.28, cache: 0.0028 },
+  'deepseek-v4-pro': { prompt: 0.435, completion: 0.87, cache: 0.003625 }
 };
 
 // Keys sorted by length desc so the first prefix match is the most specific
