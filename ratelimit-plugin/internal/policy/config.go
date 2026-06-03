@@ -17,14 +17,43 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config captures the policy: section of config.yaml. Empty / missing section
-// → Enabled() returns false → middleware is a pass-through.
+// Config captures the policy: section of config.yaml.
 type Config struct {
+	// BlockServiceTiers lists service_tier values that are rejected outright
+	// with HTTP 400 (opt-in; empty/missing → no tier is rejected).
 	BlockServiceTiers []string
+
+	// StripPriority controls silent removal of service_tier:"priority" from
+	// request bodies (OpenAI/Codex fast-mode). Unlike BlockServiceTiers — which
+	// rejects with 400 — stripping lets the request through at the upstream's
+	// default tier. It is opt-OUT: a nil pointer (the key omitted, or no policy
+	// section at all) means strip, so priority is denied by default. Set
+	// `strip_priority_service_tier: false` to let callers keep priority.
+	StripPriority *bool
 }
 
+// Enabled reports whether the reject-list (BlockServiceTiers) is non-empty.
+// It deliberately ignores StripPriority — IsBlockedTier keys off this, and the
+// strip path must not be treated as a block.
 func (c *Config) Enabled() bool {
 	return c != nil && len(c.BlockServiceTiers) > 0
+}
+
+// ShouldStripPriority reports whether service_tier:"priority" is silently
+// stripped. Default (nil / missing config) is true — priority is denied unless
+// the operator explicitly opts back in with strip_priority_service_tier: false.
+func (c *Config) ShouldStripPriority() bool {
+	if c == nil || c.StripPriority == nil {
+		return true
+	}
+	return *c.StripPriority
+}
+
+// Active reports whether the middleware needs to inspect requests at all. With
+// stripping default-on this is almost always true; it only goes false when an
+// operator both clears the block list and sets strip_priority_service_tier:false.
+func (c *Config) Active() bool {
+	return c.Enabled() || c.ShouldStripPriority()
 }
 
 // IsBlockedTier returns true when tier (case-insensitive) is in the blocklist.
@@ -51,6 +80,7 @@ type rawRoot struct {
 
 type rawConfig struct {
 	BlockServiceTiers []string `yaml:"block_service_tiers"`
+	StripPriority     *bool    `yaml:"strip_priority_service_tier"`
 }
 
 func LoadFromFile(p string) (*Config, error) {
@@ -66,7 +96,7 @@ func ParseBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("unmarshal yaml: %w", err)
 	}
-	cfg := &Config{}
+	cfg := &Config{StripPriority: root.Policy.StripPriority}
 	for _, t := range root.Policy.BlockServiceTiers {
 		t = strings.TrimSpace(t)
 		if t == "" {

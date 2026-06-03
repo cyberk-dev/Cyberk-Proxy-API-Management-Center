@@ -72,9 +72,10 @@ func main() {
 		policyCfg = &policy.Config{}
 	}
 	policyStore := policy.NewConfigStore(policyCfg)
-	if policyCfg.Enabled() {
-		log.Infof("policy: enabled (block_service_tiers=%v)", policyCfg.BlockServiceTiers)
-	}
+	// strip_priority defaults on, so log unconditionally — operators need to know
+	// priority fast-mode is being silently stripped even with no policy section.
+	log.Infof("policy: strip_priority=%v block_service_tiers=%v",
+		policyCfg.ShouldStripPriority(), policyCfg.BlockServiceTiers)
 
 	cbCfg, err := contextbudget.LoadFromFile(absCfg)
 	if err != nil {
@@ -149,7 +150,8 @@ func main() {
 	}
 
 	if err := policyStore.Watch(ctx, absCfg, func(c *policy.Config) {
-		log.Infof("policy: config swapped (block_service_tiers=%v)", c.BlockServiceTiers)
+		log.Infof("policy: config swapped (strip_priority=%v block_service_tiers=%v)",
+			c.ShouldStripPriority(), c.BlockServiceTiers)
 	}); err != nil {
 		log.Warnf("policy: watcher disabled: %v", err)
 	}

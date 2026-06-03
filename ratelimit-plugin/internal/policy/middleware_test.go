@@ -188,3 +188,123 @@ func TestMiddleware_HotReload(t *testing.T) {
 		t.Fatalf("after reload: should block, got %d", resp.StatusCode)
 	}
 }
+
+// decodeEcho reads the echoed (post-middleware) request body the test server
+// reflects back, so assertions can inspect what would be forwarded upstream.
+func decodeEcho(t *testing.T, resp *http.Response) map[string]any {
+	t.Helper()
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("decode echoed body %q: %v", raw, err)
+	}
+	return m
+}
+
+func TestMiddleware_StripsPriorityByDefault(t *testing.T) {
+	// Empty config → strip defaults on. Priority is silently removed and the
+	// request still succeeds (no 400), with all other fields preserved.
+	srv := newTestServer(t, NewConfigStore(mustParse(t, ``)))
+	defer srv.Close()
+
+	resp := postJSON(t, srv.URL+"/v1/responses",
+		`{"model":"gpt-5","service_tier":"priority","input":"hi"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("strip should not reject, got %d", resp.StatusCode)
+	}
+	body := decodeEcho(t, resp)
+	if _, ok := body["service_tier"]; ok {
+		t.Errorf("service_tier should be stripped, got %v", body["service_tier"])
+	}
+	if body["model"] != "gpt-5" || body["input"] != "hi" {
+		t.Errorf("other fields must survive strip, got %+v", body)
+	}
+}
+
+func TestMiddleware_StripIsCaseInsensitive(t *testing.T) {
+	srv := newTestServer(t, NewConfigStore(mustParse(t, ``)))
+	defer srv.Close()
+
+	for _, val := range []string{"priority", "Priority", "PRIORITY"} {
+		resp := postJSON(t, srv.URL+"/v1/responses",
+			`{"model":"gpt-5","service_tier":"`+val+`"}`)
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			t.Fatalf("tier %q: strip should not reject, got %d", val, resp.StatusCode)
+		}
+		if _, ok := decodeEcho(t, resp)["service_tier"]; ok {
+			t.Errorf("tier %q should be stripped", val)
+		}
+	}
+}
+
+func TestMiddleware_StripLeavesNonPriorityUntouched(t *testing.T) {
+	srv := newTestServer(t, NewConfigStore(mustParse(t, ``)))
+	defer srv.Close()
+
+	for _, val := range []string{"auto", "default", "flex"} {
+		resp := postJSON(t, srv.URL+"/v1/responses",
+			`{"model":"gpt-5","service_tier":"`+val+`"}`)
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			t.Fatalf("tier %q should pass, got %d", val, resp.StatusCode)
+		}
+		if got := decodeEcho(t, resp)["service_tier"]; got != val {
+			t.Errorf("tier %q must be preserved, got %v", val, got)
+		}
+	}
+}
+
+func TestMiddleware_StripOptOut(t *testing.T) {
+	// Explicit opt-out lets priority through unchanged.
+	srv := newTestServer(t, NewConfigStore(
+		mustParse(t, "policy:\n  strip_priority_service_tier: false\n")))
+	defer srv.Close()
+
+	resp := postJSON(t, srv.URL+"/v1/responses",
+		`{"model":"gpt-5","service_tier":"priority"}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("opt-out should pass priority through, got %d", resp.StatusCode)
+	}
+	if got := decodeEcho(t, resp)["service_tier"]; got != "priority" {
+		t.Errorf("opt-out must preserve priority, got %v", got)
+	}
+}
+
+func TestMiddleware_StripFailsOpenOnTruncatedBody(t *testing.T) {
+	// A body larger than the 16 MiB peek cap is truncated; strip can't safely
+	// rewrite it (service_tier may sit beyond the buffer), so it fails open and
+	// the request passes through with service_tier intact rather than 400ing.
+	srv := newTestServer(t, NewConfigStore(mustParse(t, ``)))
+	defer srv.Close()
+
+	const maxBodyPeek = 16 << 20
+	pad := strings.Repeat("x", maxBodyPeek+1024)
+	body := `{"model":"gpt-5","service_tier":"priority","pad":"` + pad + `"}`
+
+	resp := postJSON(t, srv.URL+"/v1/responses", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("truncated body should fail open (200), got %d", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(got)[:512], `"service_tier":"priority"`) {
+		t.Error("truncated body should pass through unstripped")
+	}
+}
+
+func TestMiddleware_BlockWinsOverStrip(t *testing.T) {
+	// priority is both default-stripped and explicitly blocked → block (the
+	// loud 400) must win so operators get the rejection they asked for.
+	srv := newTestServer(t, NewConfigStore(
+		mustParse(t, `policy: { block_service_tiers: [priority] }`)))
+	defer srv.Close()
+
+	resp := postJSON(t, srv.URL+"/v1/responses",
+		`{"model":"gpt-5","service_tier":"priority"}`)
+	resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("block must take precedence over strip, got %d", resp.StatusCode)
+	}
+}

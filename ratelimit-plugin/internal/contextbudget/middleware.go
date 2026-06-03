@@ -37,13 +37,19 @@ var (
 //     shape to walk.
 //  4. Pick the budget figure for this request:
 //     - If a Tracker is wired in AND the prior turn's accurate count is
-//       still fresh for this session, use that (avoids char/4 drift).
+//     still fresh for this session, use that (avoids char/4 drift).
 //     - Otherwise fall back to char/4 estimation.
 //  5. >= hard: abort with 413 (JSON) or one SSE error event (streaming).
-//     >= soft and < hard: inject <system-reminder> into the last user
-//     message and replace c.Request.Body with the mutated bytes so the
-//     downstream handler's c.GetRawData() picks up the new body.
-//     < soft: pass through unchanged.
+//     >= soft and < hard: reject once per session (RespondOverflow), then
+//     pass subsequent in-burst requests through. < soft: pass through.
+//
+// NOTE: this middleware does NOT currently rewrite c.Request.Body — it only
+// reads the peek for estimation and either rejects or passes through. If a
+// future change adds body mutation here (e.g. injecting a <system-reminder>),
+// it MUST read the live c.Request.Body, not peek.Body: an earlier middleware
+// (policy strip, effortnormalize) may have already replaced the body without
+// refreshing the peek cache, so rebuilding from peek.Body would silently
+// revert those edits.
 //
 // The session key (header- or body-hash-derived) is stashed on the
 // request context regardless of whether a tracker hit occurred, so the
@@ -51,10 +57,7 @@ var (
 // the tracker for NEXT turn.
 //
 // IMPORTANT: this middleware must run AFTER promptlog so the prompt log
-// records the original (unmutated) request body. It is safe to run after
-// ratelimit/policy because mutation only happens on the body bytes that
-// would be forwarded upstream — neither earlier middleware re-reads the
-// peek cache after this point.
+// records the original (unmutated) request body.
 func Middleware(store *ConfigStore, tracker *Tracker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := store.Get()

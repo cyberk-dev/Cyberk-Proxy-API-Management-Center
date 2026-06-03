@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/cyberk/ratelimit-plugin/internal/effortnormalize"
 	"github.com/cyberk/ratelimit-plugin/internal/policy"
 	"github.com/cyberk/ratelimit-plugin/internal/ratelimit"
 )
@@ -126,5 +127,46 @@ func TestChain_PolicyErrorShape(t *testing.T) {
 	}
 	if errObj["param"] != "service_tier" {
 		t.Errorf("error.param: got %v (want service_tier)", errObj["param"])
+	}
+}
+
+// The strip path reads the *live* c.Request.Body, not the cached peek, so it
+// composes with effortnormalize (which runs just before policy and replaces
+// the body in place without refreshing the peek cache). This locks in that
+// invariant: both mutations must survive on the same request. A regression to
+// rebuilding from peek.Body would revert one of them and fail here.
+func TestChain_EffortNormalizeThenPolicyStripCompose(t *testing.T) {
+	policyCfg, err := policy.ParseBytes([]byte(``)) // strip defaults on
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := gin.New()
+	r.Use(effortnormalize.Middleware())
+	r.Use(policy.Middleware(policy.NewConfigStore(policyCfg)))
+	r.POST("/v1/responses", func(c *gin.Context) {
+		body, _ := io.ReadAll(c.Request.Body)
+		c.Data(http.StatusOK, "application/json", body)
+	})
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	resp := post(t, srv.URL+"/v1/responses", "alice",
+		`{"model":"gpt-5","service_tier":"priority","reasoning":{"effort":"minimal"}}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var body map[string]any
+	raw, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if _, ok := body["service_tier"]; ok {
+		t.Errorf("policy should have stripped service_tier, got %v", body["service_tier"])
+	}
+	reasoning, _ := body["reasoning"].(map[string]any)
+	if reasoning == nil || reasoning["effort"] != "low" {
+		t.Errorf("effortnormalize fix must survive the strip, got reasoning=%v", body["reasoning"])
 	}
 }

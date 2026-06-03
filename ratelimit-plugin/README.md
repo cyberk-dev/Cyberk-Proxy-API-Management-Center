@@ -68,7 +68,35 @@ Behavior:
 - **Hot-reloadable.** Edits to `config.yaml` propagate via fsnotify (same path
   as the `ratelimit:` section).
 
-Omit the block — or leave the list empty — to disable the feature entirely.
+Omit the block — or leave the list empty — to disable rejection entirely.
+
+### Silent strip of `priority` (default-on)
+
+Separately from the reject list, the proxy **silently strips**
+`service_tier: "priority"` from request bodies so callers can't obtain fast-mode
+processing on Codex/OpenAI upstreams. This is **on by default** — including when
+there is no `policy:` section at all — and is controlled by a single flag:
+
+```yaml
+policy:
+  strip_priority_service_tier: false  # default: true (strip)
+```
+
+- **Strip, don't reject.** The field is removed and the request proceeds at the
+  upstream's default tier — the client gets a normal `200`, not a `400`. This is
+  the difference from `block_service_tiers`, which fails the call loudly.
+- **Priority only.** Other tiers (`auto`, `default`, `flex`) pass through
+  untouched; only `priority` (case-insensitive) is removed.
+- **Block wins.** If `priority` is also listed in `block_service_tiers`, the
+  request is rejected with `400` instead of stripped — an explicit block beats
+  the silent default.
+- **OpenAI/Codex-only in practice.** Anthropic and Gemini requests don't carry
+  `service_tier`, so they're unaffected.
+- **Default-on, even on load failure.** If the `policy:` section is missing or
+  fails to parse, stripping stays enabled (priority denied by default).
+- **Hot-reloadable.** Same fsnotify path as the rest of the section.
+
+Set `strip_priority_service_tier: false` to let callers keep `priority`.
 
 ## Weighted routing (Codex)
 
