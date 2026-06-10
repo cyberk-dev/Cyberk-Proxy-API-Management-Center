@@ -26,6 +26,7 @@ export const DEFAULT_MODEL_PRICES: Record<string, ModelPrice> = {
   'claude-opus-4-7': { prompt: 5.0, completion: 25.0, cache: 0.5 },
   'claude-opus-4-6': { prompt: 5.0, completion: 25.0, cache: 0.5 },
   'claude-opus-4-5': { prompt: 5.0, completion: 25.0, cache: 0.5 },
+  'claude-fable-5': { prompt: 10.0, completion: 50.0, cache: 1.0 },
 
   'kimi-k2.5': { prompt: 0.6, completion: 3.0, cache: 0.1 },
   'kimi-k2.6': { prompt: 0.95, completion: 4.0, cache: 0.16 },

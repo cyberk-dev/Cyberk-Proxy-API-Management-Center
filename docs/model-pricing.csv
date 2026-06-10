@@ -13,6 +13,7 @@ claude-opus-4-8,5.00,0.50,25.00,"Same rate card từ 4.5. Fast mode: $10/$50 (r�
 claude-opus-4-7,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10. New tokenizer có thể dùng +35% tokens/same text.",platform.claude.com/docs/en/about-claude/pricing
 claude-opus-4-6,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10. Fast mode: $30/$150.",platform.claude.com/docs/en/about-claude/pricing
 claude-opus-4-5,5.00,0.50,25.00,"Cache 5m write: $6.25. Cache 1h write: $10.",platform.claude.com/docs/en/about-claude/pricing
+claude-fable-5,10.00,1.00,50.00,"Launched 9/6/2026. Mythos-class GA model, gấp 2x Opus 4.8. 1M ctx. Cache 90% off input. High-risk queries fallback về Opus 4.8 (không tính giá Fable). US-only +10%.",platform.claude.com/docs/en/about-claude/pricing
 kimi-k2.5,0.60,0.10,3.00,"Moonshot platform official landing page.",platform.moonshot.ai
 kimi-k2.6,0.95,0.16,4.00,"Moonshot platform official landing page. 256K ctx.",platform.moonshot.ai
 qwen3.6-plus,0.50,0.10,3.00,"Released 2/4/2026. 1M ctx. Cache là suy luận từ Plus family implicit cache rule (20% × $0.50 = $0.10) - CHƯA verify trực tiếp cho snapshot 3.6 này.",artificialanalysis.ai/models/qwen3-6-plus (cite 'based on Alibaba API')
