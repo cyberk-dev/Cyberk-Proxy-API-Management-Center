@@ -37,6 +37,7 @@ import {
   ApiKeysCardEditor,
   PayloadFilterRulesEditor,
   PayloadRulesEditor,
+  StringListEditor,
 } from './VisualConfigEditorBlocks';
 import styles from './VisualConfigEditor.module.scss';
 
@@ -216,6 +217,10 @@ export function VisualConfigEditor({
 
   const handleApiKeysTextChange = useCallback(
     (apiKeysText: string) => onChange({ apiKeysText }),
+    [onChange]
+  );
+  const handlePluginStoreSourcesChange = useCallback(
+    (pluginStoreSources: string[]) => onChange({ pluginStoreSources }),
     [onChange]
   );
   const handlePayloadDefaultRulesChange = useCallback(
@@ -658,7 +663,41 @@ export function VisualConfigEditor({
                   disabled={disabled}
                   onChange={(loggingToFile) => onChange({ loggingToFile })}
                 />
+                <ToggleRow
+                  title={t('config_management.visual.sections.system.plugins_enabled')}
+                  description={t('config_management.visual.sections.system.plugins_enabled_desc')}
+                  checked={values.pluginsEnabled}
+                  disabled={disabled}
+                  onChange={(pluginsEnabled) => onChange({ pluginsEnabled })}
+                />
               </SectionGrid>
+
+              <SectionSubsection
+                title={t('config_management.visual.sections.system.plugin_store_sources')}
+                description={t(
+                  'config_management.visual.sections.system.plugin_store_sources_desc'
+                )}
+              >
+                <div className={styles.fieldShell}>
+                  <label className={styles.fieldLabel}>
+                    {t('config_management.visual.sections.system.plugin_store_sources_label')}
+                  </label>
+                  <StringListEditor
+                    value={values.pluginStoreSources}
+                    disabled={disabled}
+                    placeholder={t(
+                      'config_management.visual.sections.system.plugin_store_sources_placeholder'
+                    )}
+                    inputAriaLabel={t(
+                      'config_management.visual.sections.system.plugin_store_sources_label'
+                    )}
+                    onChange={handlePluginStoreSourcesChange}
+                  />
+                  <div className={styles.fieldHint}>
+                    {t('config_management.visual.sections.system.plugin_store_sources_hint')}
+                  </div>
+                </div>
+              </SectionSubsection>
 
               <SectionGrid>
                 <Input
@@ -813,6 +852,17 @@ export function VisualConfigEditor({
                       disabled={disabled}
                     />
                   </SectionGrid>
+                  <SectionGrid>
+                    <ToggleRow
+                      title={t('config_management.visual.sections.headers.codex_identity_confuse')}
+                      description={t(
+                        'config_management.visual.sections.headers.codex_identity_confuse_desc'
+                      )}
+                      checked={values.codexIdentityConfuse}
+                      disabled={disabled}
+                      onChange={(codexIdentityConfuse) => onChange({ codexIdentityConfuse })}
+                    />
+                  </SectionGrid>
                 </SectionStack>
               </SectionSubsection>
 
@@ -931,6 +981,16 @@ export function VisualConfigEditor({
                         }
                       />
                     </FieldShell>
+                    <Input
+                      label={t('config_management.visual.sections.network.gpt_image_2_base_model')}
+                      placeholder="gpt-5.4-mini"
+                      value={values.gptImage2BaseModel}
+                      onChange={(e) => onChange({ gptImage2BaseModel: e.target.value })}
+                      disabled={disabled}
+                      hint={t(
+                        'config_management.visual.sections.network.gpt_image_2_base_model_hint'
+                      )}
+                    />
                     <Input
                       label={t('config_management.visual.sections.network.session_affinity_ttl')}
                       placeholder="1h"

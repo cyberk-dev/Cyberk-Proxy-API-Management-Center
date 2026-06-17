@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { modelsApi } from '@/services/api';
 import { buildHeaderObject } from '@/utils/headers';
+import { getErrorMessage } from '@/utils/helpers';
 import type { ModelInfo } from '@/utils/models';
 import type { ApiKeyEntryInput, ProviderBrand } from '../../types';
 
@@ -13,29 +14,6 @@ export const MODEL_DISCOVERY_BRANDS: ReadonlyArray<ProviderBrand> = [
 
 export const isModelDiscoveryBrand = (brand: ProviderBrand): boolean =>
   MODEL_DISCOVERY_BRANDS.includes(brand);
-
-const parseHeadersText = (text: string): Record<string, string> => {
-  const out: Record<string, string> = {};
-  String(text ?? '')
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .forEach((line) => {
-      const sep = line.indexOf(':');
-      if (sep <= 0) return;
-      const key = line.slice(0, sep).trim();
-      const value = line.slice(sep + 1).trim();
-      if (!key) return;
-      out[key] = value;
-    });
-  return out;
-};
-
-const toErrorMessage = (err: unknown): string => {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'string') return err;
-  return '';
-};
 
 export interface UseModelDiscoveryArgs {
   brand: ProviderBrand;
@@ -57,18 +35,8 @@ export interface UseModelDiscoveryResult {
   reset: () => void;
 }
 
-export function useModelDiscovery(
-  args: UseModelDiscoveryArgs
-): UseModelDiscoveryResult {
-  const {
-    brand,
-    baseUrl,
-    formHeaders,
-    apiKeyEntries,
-    apiKey,
-    fallbackApiKey,
-    authIndex,
-  } = args;
+export function useModelDiscovery(args: UseModelDiscoveryArgs): UseModelDiscoveryResult {
+  const { brand, baseUrl, formHeaders, apiKeyEntries, apiKey, fallbackApiKey, authIndex } = args;
 
   const available = isModelDiscoveryBrand(brand);
   const [loading, setLoading] = useState(false);
@@ -109,19 +77,18 @@ export function useModelDiscovery(
           resolvedAuthIndex
         );
       } else if (brand === 'openaiCompatibility') {
-        const firstEntry = (apiKeyEntries ?? []).find((e) =>
-          (e.apiKey ?? '').trim() || (e.authIndex ?? '').trim()
+        const firstEntry = (apiKeyEntries ?? []).find(
+          (e) =>
+            (e.apiKey ?? '').trim() || (e.existingApiKey ?? '').trim() || (e.authIndex ?? '').trim()
         );
-        const entryKey = (firstEntry?.apiKey ?? '').trim();
-        const entryAuthIndex =
-          (firstEntry?.authIndex ?? '').trim() || resolvedAuthIndex;
-        const entryHeaders = parseHeadersText(firstEntry?.headersText ?? '');
-        const headers = { ...baseHeaders, ...entryHeaders };
+        const entryKey =
+          (firstEntry?.apiKey ?? '').trim() || (firstEntry?.existingApiKey ?? '').trim();
+        const entryAuthIndex = (firstEntry?.authIndex ?? '').trim() || resolvedAuthIndex;
         try {
           next = await modelsApi.fetchModelsViaApiCall(
             baseUrl,
             entryKey,
-            headers,
+            baseHeaders,
             entryAuthIndex
           );
         } catch (firstErr) {
@@ -139,21 +106,12 @@ export function useModelDiscovery(
       setHasFetched(true);
     } catch (err) {
       setModels([]);
-      setError(toErrorMessage(err) || 'Failed to fetch models');
+      setError(getErrorMessage(err) || 'Failed to fetch models');
       setHasFetched(true);
     } finally {
       setLoading(false);
     }
-  }, [
-    available,
-    apiKey,
-    apiKeyEntries,
-    authIndex,
-    baseUrl,
-    brand,
-    fallbackApiKey,
-    formHeaders,
-  ]);
+  }, [available, apiKey, apiKeyEntries, authIndex, baseUrl, brand, fallbackApiKey, formHeaders]);
 
   const reset = useCallback(() => {
     setModels([]);
@@ -163,11 +121,9 @@ export function useModelDiscovery(
   }, []);
 
   const inputSignature = useMemo(() => {
-    const headerSig = formHeaders
-      .map((h) => `${h.key}:${h.value}`)
-      .join('|');
+    const headerSig = formHeaders.map((h) => `${h.key}:${h.value}`).join('|');
     const entriesSig = (apiKeyEntries ?? [])
-      .map((e) => `${e.apiKey ?? ''}::${e.authIndex ?? ''}::${e.headersText ?? ''}`)
+      .map((e) => `${e.apiKey ?? ''}::${e.existingApiKey ?? ''}::${e.authIndex ?? ''}`)
       .join('|');
     return [
       baseUrl,

@@ -13,11 +13,25 @@
   }
 }
 
+.pageHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+  margin: 0 0 $spacing-lg 0;
+
+  @include mobile {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: $spacing-xs;
+  }
+}
+
 .pageTitle {
   font-size: 28px;
   font-weight: 700;
   color: var(--text-primary);
-  margin: 0 0 $spacing-lg 0;
+  margin: 0;
 }
 
 .tabBar {
@@ -82,6 +96,17 @@
     min-height: auto;
     overflow: visible;
   }
+}
+
+.runtimeNotice {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-full;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 .toolbar {
@@ -347,6 +372,53 @@
   overflow: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+
+  :global(.item-meta) {
+    flex: 1 1 260px;
+    min-width: 0;
+  }
+
+  :global(.item-title) {
+    overflow-wrap: anywhere;
+  }
+
+  :global(.item-actions) {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
+.errorLogViewer {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  min-height: 0;
+}
+
+.errorLogViewerMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $spacing-sm $spacing-md;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.errorLogContent {
+  margin: 0;
+  padding: 12px;
+  max-height: min(58vh, 640px);
+  overflow: auto;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  -webkit-overflow-scrolling: touch;
 }
 
 .loadMoreBanner {
@@ -522,8 +594,9 @@
 }
 
 .requestIdBadge {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
-    'Courier New', monospace;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
   font-size: 11px;
   color: #0891b2;
   background: rgba(8, 145, 178, 0.1);
@@ -622,6 +695,9 @@
 @media (max-height: 820px) {
   .pageTitle {
     font-size: 24px;
+  }
+
+  .pageHeader {
     margin-bottom: $spacing-md;
   }
 
@@ -671,6 +747,9 @@
 @media (max-height: 600px) {
   .pageTitle {
     font-size: 20px;
+  }
+
+  .pageHeader {
     margin-bottom: $spacing-sm;
   }
 
@@ -720,5 +799,49 @@
 
   .errorPanel {
     height: 280px;
+  }
+}
+
+.logCardFullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: $z-modal - 1;
+  min-height: 0;
+  width: 100vw;
+  height: 100vh;
+  padding: $spacing-lg;
+  border-radius: 0;
+  border: none;
+  overflow: hidden;
+  background: var(--bg-primary);
+
+  @include mobile {
+    padding: $spacing-md;
+    min-height: 0;
+    overflow: hidden;
+  }
+}
+
+:global(body.logs-fullscreen-active) :global(.page-transition__layer) {
+  transform: none !important;
+}
+
+.logPanelFullscreen {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  max-height: none;
+  resize: none;
+
+  @include tablet {
+    min-height: 0;
+    max-height: none;
+  }
+
+  @include mobile {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    max-height: none;
   }
 }
