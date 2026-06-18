@@ -161,6 +161,71 @@ func TestResolve_NoLimit(t *testing.T) {
 	}
 }
 
+func TestParse_AliasCanonical(t *testing.T) {
+	cfg := mustParse(t, `
+ratelimit:
+  window: 5h
+  requests: 100
+oauth-model-alias:
+  codex:
+    - name: gpt-5.5
+      alias: gpt-5.5-high
+      fork: true
+    - name: gpt-5.5
+      alias: claude-opus-4-8
+      fork: true
+    - name: gpt-5.4
+      alias: claude-sonnet-4-6
+      fork: true
+  kiro:
+    - name: kiro-claude-sonnet-4-6
+      alias: claude-sonnet-4-6
+      fork: true
+`)
+
+	cases := []struct {
+		name, in, want string
+	}{
+		{"unambiguous fork alias", "gpt-5.5-high", "gpt-5.5"},
+		{"unambiguous claude alias → gpt-5.5", "claude-opus-4-8", "gpt-5.5"},
+		{"case-insensitive", "CLAUDE-OPUS-4-8", "gpt-5.5"},
+		{"trimmed", "  claude-opus-4-8  ", "gpt-5.5"},
+		{"ambiguous across providers left alone", "claude-sonnet-4-6", "claude-sonnet-4-6"},
+		{"upstream name passes through", "gpt-5.5", "gpt-5.5"},
+		{"unknown model normalized passthrough", "  GPT-4o ", "gpt-4o"},
+		{"empty", "", ""},
+		// Thinking suffix "(value)" is stripped before the alias lookup so it
+		// collapses onto the upstream counter instead of dodging the cap.
+		{"alias with level suffix", "claude-opus-4-8(high)", "gpt-5.5"},
+		{"alias with numeric suffix", "claude-opus-4-8(8192)", "gpt-5.5"},
+		{"upstream name with suffix collapses to base", "gpt-5.5(high)", "gpt-5.5"},
+		{"suffix is case-insensitive too", "CLAUDE-OPUS-4-8(HIGH)", "gpt-5.5"},
+		{"unbalanced open paren left as-is", "gpt-5.5(high", "gpt-5.5(high"},
+		{"closing paren without open left as-is", "gpt-5.5high)", "gpt-5.5high)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cfg.Canonical(tc.in); got != tc.want {
+				t.Errorf("Canonical(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCanonical_NilAndNoAliasSection(t *testing.T) {
+	var nilCfg *Config
+	if got := nilCfg.Canonical("Foo"); got != "foo" {
+		t.Errorf("nil config: got %q, want foo", got)
+	}
+	cfg := mustParse(t, `ratelimit: { window: 1h, requests: 5 }`)
+	if cfg.aliasCanonical != nil {
+		t.Errorf("no alias section should yield nil map, got %v", cfg.aliasCanonical)
+	}
+	if got := cfg.Canonical("bar"); got != "bar" {
+		t.Errorf("no alias section: got %q, want bar", got)
+	}
+}
+
 func TestResolve_ZeroKeyOverrideSkipped(t *testing.T) {
 	cfg := mustParse(t, `
 ratelimit:

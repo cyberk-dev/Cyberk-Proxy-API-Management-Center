@@ -19,6 +19,11 @@ type Config struct {
 
 	modelOrder   []string
 	resolveCache sync.Map
+
+	// aliasCanonical maps a normalized OAuth model alias to its upstream model
+	// name (e.g. "claude-opus-4-8" -> "gpt-5.5"). Built from the top-level
+	// `oauth-model-alias` config. See buildAliasCanonical and Canonical.
+	aliasCanonical map[string]string
 }
 
 type ModelConfig struct {
@@ -45,6 +50,54 @@ func (c *Config) Resolve(apiKey, model string) (limit int, window time.Duration,
 	l, w, a := c.resolveUncached(apiKey, model)
 	c.resolveCache.Store(cacheKey, resolved{l, w, a})
 	return l, w, a
+}
+
+// Canonical maps an OAuth model alias to its upstream model name so that all
+// aliases forking to the same upstream share one rate-limit counter and cap.
+// The proxy core resolves aliases to their upstream model *after* the
+// rate-limit middleware runs, so without this an alias like "claude-opus-4-8"
+// (which forks to gpt-5.5) would get its own counter and bypass the gpt-5.5
+// per-key cap.
+//
+// The input is first stripped of any trailing thinking suffix "(value)"
+// (mirroring the core's thinking.ParseSuffix, which the core also applies
+// before alias resolution) so that "gpt-5.5(high)" and "claude-opus-4-8(high)"
+// collapse onto the same counter as the bare upstream rather than fragmenting
+// into per-suffix counters that dodge the cap.
+//
+// Only aliases that map to a single upstream across all providers are
+// canonicalized; ambiguous aliases (the serving provider is unknown at this
+// layer) are returned normalized but otherwise unchanged, so they fall through
+// to wildcard/default limits as before. Alias→upstream resolution is single-hop
+// by design: it mirrors the core, which resolves one alias level per provider.
+// The return value is always normalized (lowercased/trimmed, suffix stripped)
+// to match how resolveUncached and extract.go treat model names.
+func (c *Config) Canonical(model string) string {
+	norm := stripThinkingSuffix(strings.ToLower(strings.TrimSpace(model)))
+	if c == nil || c.aliasCanonical == nil {
+		return norm
+	}
+	if upstream, ok := c.aliasCanonical[norm]; ok {
+		return upstream
+	}
+	return norm
+}
+
+// stripThinkingSuffix removes a trailing "(value)" thinking suffix from a model
+// name, mirroring the upstream SDK's thinking.ParseSuffix (format
+// "model-name(value)"): split at the LAST "(", but only when the string ends
+// with ")". The core strips this suffix before deriving the base model for
+// alias resolution, so the limiter must strip it too or suffixed requests key
+// on a separate counter and bypass the upstream's cap.
+func stripThinkingSuffix(model string) string {
+	if !strings.HasSuffix(model, ")") {
+		return model
+	}
+	i := strings.LastIndex(model, "(")
+	if i < 0 {
+		return model
+	}
+	return strings.TrimSpace(model[:i])
 }
 
 func (c *Config) resolveUncached(apiKey, model string) (int, time.Duration, bool) {
@@ -127,7 +180,16 @@ func derefDuration(p *time.Duration, fallback time.Duration) time.Duration {
 }
 
 type rawRoot struct {
-	Ratelimit rawConfig `yaml:"ratelimit"`
+	Ratelimit       rawConfig                  `yaml:"ratelimit"`
+	OAuthModelAlias map[string][]rawAliasEntry `yaml:"oauth-model-alias"`
+}
+
+// rawAliasEntry mirrors one entry of the top-level `oauth-model-alias.<provider>`
+// list: `name` is the upstream model, `alias` is the name clients call it by.
+type rawAliasEntry struct {
+	Name  string `yaml:"name"`
+	Alias string `yaml:"alias"`
+	Fork  bool   `yaml:"fork"`
 }
 
 type rawConfig struct {
@@ -155,7 +217,59 @@ func ParseBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("unmarshal yaml: %w", err)
 	}
-	return buildConfig(root.Ratelimit)
+	cfg, err := buildConfig(root.Ratelimit)
+	if err != nil {
+		return nil, err
+	}
+	cfg.aliasCanonical = buildAliasCanonical(root.OAuthModelAlias)
+	return cfg, nil
+}
+
+// buildAliasCanonical builds the reverse alias→upstream map consumed by
+// Config.Canonical. raw is keyed by provider; each value lists {name, alias}
+// pairs where `name` is the upstream model and `alias` is the client-facing
+// name.
+//
+// An alias is canonicalized only when it resolves to exactly one upstream
+// across every provider. When the same alias forks to different upstreams under
+// different providers (e.g. "claude-sonnet-4-6" → gpt-5.4 under codex but a
+// claude model under kiro), the serving provider is not known at the
+// rate-limit layer, so the alias is dropped from the map and left to match
+// wildcard/default limits unchanged.
+func buildAliasCanonical(raw map[string][]rawAliasEntry) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	// alias -> set of distinct upstream names seen across all providers.
+	upstreams := map[string]map[string]struct{}{}
+	for _, entries := range raw {
+		for _, e := range entries {
+			alias := strings.ToLower(strings.TrimSpace(e.Alias))
+			name := strings.ToLower(strings.TrimSpace(e.Name))
+			if alias == "" || name == "" || alias == name {
+				continue
+			}
+			set := upstreams[alias]
+			if set == nil {
+				set = map[string]struct{}{}
+				upstreams[alias] = set
+			}
+			set[name] = struct{}{}
+		}
+	}
+	out := make(map[string]string, len(upstreams))
+	for alias, set := range upstreams {
+		if len(set) != 1 {
+			continue // ambiguous across providers — leave uncanonicalized
+		}
+		for name := range set {
+			out[alias] = name
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func buildConfig(raw rawConfig) (*Config, error) {

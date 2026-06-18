@@ -448,6 +448,15 @@ func (s *Store) KeyDetail(apiKey string, since time.Time, limit int, rl RateLimi
 		resp.FailureCount += ms.FailureCount
 
 		// Rate-limit panel: per-model count within the configured window.
+		//
+		// modelName here is the upstream model the core recorded (aliases are
+		// already resolved by the time usage is logged), so Resolve is called on
+		// the canonical name — matching the limiter, which canonicalizes aliases
+		// before keying. The two therefore agree for unambiguous aliases. For
+		// aliases the limiter leaves uncanonicalized (ambiguous across providers)
+		// the limiter's actual counter is keyed on the requested name, so this
+		// upstream-keyed estimate can diverge; the limiter remains source of
+		// truth at enforcement time.
 		if rl != nil {
 			if rlLimit, window, applies := rl.Resolve(apiKey, modelName); applies && rlLimit > 0 && window > 0 {
 				cutoffMs := now.UnixMilli() - window.Milliseconds()

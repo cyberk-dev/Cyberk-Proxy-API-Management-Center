@@ -209,6 +209,151 @@ ratelimit:
 	}
 }
 
+func TestMiddleware_AliasSharesCounter(t *testing.T) {
+	// gpt-5.5 cap is 2. Three requests sent under three different alias names
+	// that all fork to gpt-5.5 must share one counter, so the 3rd is rejected.
+	cfg := mustParse(t, `
+ratelimit:
+  window: 1h
+  models:
+    gpt-5.5:
+      requests: 2
+oauth-model-alias:
+  codex:
+    - name: gpt-5.5
+      alias: gpt-5.5-high
+      fork: true
+    - name: gpt-5.5
+      alias: claude-opus-4-8
+      fork: true
+`)
+	lim := NewLimiter()
+	srv := newTestServer(t, NewConfigStore(cfg), lim)
+	defer srv.Close()
+	url := srv.URL + "/v1/chat/completions"
+
+	if resp := sendJSON(t, url, "alice", "gpt-5.5"); resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("1st (gpt-5.5): got %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := sendJSON(t, url, "alice", "claude-opus-4-8"); resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("2nd (claude-opus-4-8 → gpt-5.5): got %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := sendJSON(t, url, "alice", "gpt-5.5-high"); resp.StatusCode != 400 {
+		resp.Body.Close()
+		t.Fatalf("3rd (gpt-5.5-high → gpt-5.5) should 400, got %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+
+	// All three aliases collapsed to a single canonical counter key.
+	if lim.Size() != 1 {
+		t.Errorf("expected one canonical counter, got size=%d", lim.Size())
+	}
+}
+
+func TestMiddleware_ThinkingSuffixSharesCounter(t *testing.T) {
+	// The core strips the "(value)" thinking suffix before alias resolution, so
+	// gpt-5.5(high) and claude-opus-4-8(high) both reach gpt-5.5 upstream. The
+	// limiter must collapse them onto the gpt-5.5 counter, not let the suffixed
+	// form dodge the cap.
+	cfg := mustParse(t, `
+ratelimit:
+  window: 1h
+  models:
+    gpt-5.5:
+      requests: 2
+    "claude-*":
+      requests: 1000
+oauth-model-alias:
+  codex:
+    - name: gpt-5.5
+      alias: claude-opus-4-8
+      fork: true
+`)
+	lim := NewLimiter()
+	srv := newTestServer(t, NewConfigStore(cfg), lim)
+	defer srv.Close()
+	url := srv.URL + "/v1/chat/completions"
+
+	if resp := sendJSON(t, url, "alice", "gpt-5.5(high)"); resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("1st (gpt-5.5(high)): got %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := sendJSON(t, url, "alice", "claude-opus-4-8(8192)"); resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("2nd (claude-opus-4-8(8192) → gpt-5.5): got %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	// Bare gpt-5.5 hits the shared cap of 2.
+	resp := sendJSON(t, url, "alice", "gpt-5.5")
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("3rd (gpt-5.5) should 400, got %d", resp.StatusCode)
+	}
+	if lim.Size() != 1 {
+		t.Errorf("expected one canonical counter, got size=%d", lim.Size())
+	}
+}
+
+func TestMiddleware_AliasPerKeyCapEnforced(t *testing.T) {
+	// Regression for the reported bug: a per-key cap on gpt-5.5 must apply even
+	// when the same upstream is reached via an alias that would otherwise match
+	// the more permissive claude-* wildcard.
+	cfg := mustParse(t, `
+ratelimit:
+  window: 1h
+  requests: 1000
+  models:
+    gpt-5.5:
+      requests: 1500
+      keys:
+        phuoc: 2
+    "claude-*":
+      requests: 1600
+oauth-model-alias:
+  codex:
+    - name: gpt-5.5
+      alias: claude-opus-4-8
+      fork: true
+`)
+	srv := newTestServer(t, NewConfigStore(cfg), NewLimiter())
+	defer srv.Close()
+	url := srv.URL + "/v1/chat/completions"
+
+	// phuoc: 1 literal gpt-5.5 + 1 alias claude-opus-4-8 = cap (2).
+	if resp := sendJSON(t, url, "phuoc", "gpt-5.5"); resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("1st (gpt-5.5): got %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := sendJSON(t, url, "phuoc", "claude-opus-4-8"); resp.StatusCode != 200 {
+		resp.Body.Close()
+		t.Fatalf("2nd (claude-opus-4-8): got %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	// Without canonicalization this would match claude-* (1600) on a separate
+	// counter and be allowed; with the fix it hits the gpt-5.5 per-key cap.
+	resp := sendJSON(t, url, "phuoc", "claude-opus-4-8")
+	defer resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("3rd (claude-opus-4-8 → gpt-5.5) should 400, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("X-RateLimit-Limit") != "2" {
+		t.Errorf("X-RateLimit-Limit: got %q, want 2 (gpt-5.5 per-key cap)", resp.Header.Get("X-RateLimit-Limit"))
+	}
+}
+
 func TestMiddleware_GeminiPath(t *testing.T) {
 	cfg := mustParse(t, `
 ratelimit:

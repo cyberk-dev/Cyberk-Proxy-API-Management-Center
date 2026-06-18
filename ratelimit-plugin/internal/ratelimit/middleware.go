@@ -54,6 +54,12 @@ func Middleware(store *ConfigStore, lim *Limiter) gin.HandlerFunc {
 			return
 		}
 
+		// Canonicalize OAuth aliases to their upstream model before keying.
+		// The core resolves aliases *after* this middleware, so without this an
+		// alias like "claude-opus-4-8" (forks to gpt-5.5) would get its own
+		// counter and dodge the gpt-5.5 per-key cap.
+		model = cfg.Canonical(model)
+
 		limit, window, ok := cfg.Resolve(apiKey, model)
 		if !ok {
 			c.Next()
