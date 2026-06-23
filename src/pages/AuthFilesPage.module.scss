@@ -419,20 +419,6 @@
   }
 }
 
-.geminiCliGrid {
-  display: grid;
-  gap: $spacing-md;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-
-  @include tablet {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  @include mobile {
-    grid-template-columns: 1fr;
-  }
-}
-
 .antigravityControls {
   display: flex;
   gap: $spacing-md;
@@ -475,27 +461,6 @@
   }
 }
 
-.geminiCliControls {
-  display: flex;
-  gap: $spacing-md;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  margin-bottom: $spacing-md;
-}
-
-.geminiCliControl {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-
-  label {
-    font-size: 12px;
-    color: var(--text-secondary);
-    font-weight: 500;
-    white-space: nowrap;
-  }
-}
-
 // 卡片渐变背景 — subtle tint only
 .antigravityCard {
   background-image: linear-gradient(180deg, rgba(224, 247, 250, 0.06), transparent);
@@ -507,10 +472,6 @@
 
 .codexCard {
   background-image: linear-gradient(180deg, rgba(234, 231, 255, 0.08), transparent);
-}
-
-.geminiCliCard {
-  background-image: linear-gradient(180deg, rgba(224, 232, 255, 0.08), transparent);
 }
 
 .kimiCard {
@@ -712,19 +673,31 @@
 .codexPlan {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 6px 12px;
   font-size: 12px;
   color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.codexPlanItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 
 .codexPlanLabel {
   color: var(--text-tertiary);
+  flex: 0 0 auto;
 }
 
 .codexPlanValue {
   font-weight: 600;
   color: var(--text-primary);
   text-transform: capitalize;
+  min-width: 0;
 }
 
 .codexPlanSeparator {
@@ -741,6 +714,8 @@
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 999px;
+  white-space: nowrap;
+  flex: 0 0 auto;
   overflow: visible;
   isolation: isolate;
   background:

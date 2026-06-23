@@ -113,7 +113,6 @@
 .antigravityGrid,
 .claudeGrid,
 .codexGrid,
-.geminiCliGrid,
 .kimiGrid,
 .xaiGrid {
   display: grid;
@@ -128,7 +127,6 @@
 .antigravityControls,
 .claudeControls,
 .codexControls,
-.geminiCliControls,
 .kimiControls,
 .xaiControls {
   display: flex;
@@ -141,7 +139,6 @@
 .antigravityControl,
 .claudeControl,
 .codexControl,
-.geminiCliControl,
 .kimiControl,
 .xaiControl {
   display: flex;
@@ -259,10 +256,6 @@
 
 .codexCard {
   background-image: linear-gradient(180deg, rgba(234, 231, 255, 0.18), rgba(234, 231, 255, 0));
-}
-
-.geminiCliCard {
-  background-image: linear-gradient(180deg, rgba(224, 232, 255, 0.2), rgba(224, 232, 255, 0));
 }
 
 .kimiCard {
@@ -465,20 +458,31 @@
 .codexPlan {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 6px 12px;
   font-size: 12px;
   color: var(--text-secondary);
   flex-wrap: wrap;
 }
 
+.codexPlanItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
 .codexPlanLabel {
   color: var(--text-tertiary);
+  flex: 0 0 auto;
 }
 
 .codexPlanValue {
   font-weight: 600;
   color: var(--text-primary);
   text-transform: capitalize;
+  min-width: 0;
 }
 
 .codexPlanSeparator {
@@ -495,6 +499,8 @@
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 999px;
+  white-space: nowrap;
+  flex: 0 0 auto;
   overflow: visible;
   isolation: isolate;
   background:
